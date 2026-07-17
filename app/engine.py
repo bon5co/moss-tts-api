@@ -164,6 +164,14 @@ class Engine:
             log.info("generated in %.1fs", time.time() - t0)
 
             decoded = processor.decode(outputs)[0]
+            # The MPS/CUDA caching allocator never returns freed blocks to
+            # the OS on its own; without this the process footprint stays at
+            # the high-water mark of the largest request (~10GB+ over the
+            # weights).
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
         wav = decoded.audio_codes_list[0].float().cpu().numpy()
         if wav.ndim > 1:
             wav = wav.squeeze()
