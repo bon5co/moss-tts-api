@@ -11,16 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from .auth import require_auth
 from .config import settings
-from .engine import encode_wav, engine
+from .engine import DEFAULT_MODEL, MODELS, encode_wav, engine, resolve_model_id
 
 router = APIRouter()
 
@@ -72,26 +73,78 @@ async def create_speech(req: SpeechRequest) -> Response:
         raise HTTPException(400, "speed is not supported by this backend; use 1.0")
 
     reference = _resolve_voice(req.voice)
-    wav, sr = await asyncio.to_thread(engine.synthesize, req.input, reference)
+    model_id = resolve_model_id(req.model)
+    wav, sr = await asyncio.to_thread(engine.synthesize, req.input, reference, model_id)
+    return _audio_response(wav, sr, req.response_format)
 
-    if req.response_format == "mp3":
+
+def _audio_response(wav, sr: int, fmt: str) -> Response:
+    if fmt == "mp3":
         body = _to_mp3(encode_wav(wav, sr, "wav"))
     else:
-        body = encode_wav(wav, sr, req.response_format)
-    return Response(content=body, media_type=MEDIA_TYPES[req.response_format])
+        body = encode_wav(wav, sr, fmt)
+    return Response(content=body, media_type=MEDIA_TYPES[fmt])
+
+
+@router.post("/v1/audio/clone", dependencies=[Depends(require_auth)])
+async def clone_speech(
+    input: str = Form(min_length=1, max_length=4096),
+    file: UploadFile = File(description="reference clip (wav/mp3/flac), 5-15s"),
+    response_format: str = Form("wav"),
+    model: str = Form(""),
+) -> Response:
+    """One-shot voice clone: multipart reference clip + text, no registration."""
+    if response_format not in MEDIA_TYPES:
+        raise HTTPException(
+            400,
+            f"response_format '{response_format}' not supported; "
+            f"use one of {sorted(MEDIA_TYPES)}",
+        )
+    suffix = Path(file.filename or "ref.wav").suffix or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        ref_path = Path(tmp.name)
+    try:
+        model_id = resolve_model_id(model)
+        wav, sr = await asyncio.to_thread(engine.synthesize, input, ref_path, model_id)
+    finally:
+        ref_path.unlink(missing_ok=True)
+    return _audio_response(wav, sr, response_format)
+
+
+class PreloadRequest(BaseModel):
+    model: str = ""
+
+
+@router.post("/v1/models/preload", dependencies=[Depends(require_auth)])
+async def preload_model(req: PreloadRequest) -> dict:
+    """Order a model into memory ahead of the first inference call."""
+    model_id = resolve_model_id(req.model)
+    started = engine.preload_async(model_id)
+    return {
+        "model": model_id,
+        "status": "loading" if started else "already-loaded",
+    }
 
 
 @router.get("/v1/models", dependencies=[Depends(require_auth)])
 async def list_models() -> dict:
+    ids = list(MODELS.values())
+    if DEFAULT_MODEL not in ids:
+        ids.insert(0, DEFAULT_MODEL)
     return {
         "object": "list",
         "data": [
             {
-                "id": settings.model_id,
+                "id": model_id,
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "openmoss",
+                "default": model_id == DEFAULT_MODEL,
+                "loaded": engine.loaded_model == model_id,
+                "loading": engine.loading_model == model_id,
             }
+            for model_id in ids
         ],
     }
 
@@ -118,7 +171,7 @@ POST /v1/audio/speech            (Content-Type: application/json)
       "input": "Text to speak.",        // required, 1-4096 chars
       "voice": "default",               // or a name from GET /v1/voices
       "response_format": "wav",         // wav | mp3 | flac | pcm
-      "model": "anything",              // accepted, ignored (single model)
+      "model": "moss-tts-v1.5",         // see Models below; unknown → default
       "speed": 1.0                      // only 1.0 supported; else 400
     }
 
@@ -132,15 +185,35 @@ OpenAI SDKs work by overriding base_url to http://localhost:8766/v1.
 
 ## Voice cloning
 
-GET /v1/voices lists available voice names. Any name other than "default"
-uses that reference clip for zero-shot cloning. New voices = drop a 5-15s
-clean WAV into the server's voices/ directory; it is picked up immediately.
+Two ways:
+
+1. Named voice: GET /v1/voices lists reference clips; pass one as "voice"
+   in /v1/audio/speech. New voices = drop a 5-15s clean WAV into the
+   server's voices/ directory; picked up immediately.
+2. One-shot: POST /v1/audio/clone (multipart/form-data) with fields
+   `input` (text), `file` (reference clip), optional `response_format`
+   and `model`. Returns audio bytes, nothing is stored.
+
+    curl -s -X POST http://localhost:8766/v1/audio/clone \\
+      -F input="Text in the cloned voice." -F file=@ref.wav -o out.wav
+
+## Models
+
+One model is resident in memory at a time; the default is the largest
+(8B, moss-tts-v1.5). Short names: moss-tts-v1.5 (8B), moss-tts-local-v1.5
+(4B), moss-tts-local (1.7B). Requesting a non-resident model on inference
+loads it first (slow — swap + load; first ever use also downloads
+weights). Unknown model names (e.g. "tts-1") resolve to the default.
+
+GET  /v1/models          — registry with default/loaded/loading flags
+POST /v1/models/preload  — {"model": "..."} (empty = default); starts a
+                           background load, returns immediately with
+                           {"status": "loading" | "already-loaded"}
 
 ## Other routes
 
-GET /v1/models  — OpenAI list-models shape
-GET /health     — {status, model, loaded, device, dtype}; first request
-                  after startup also loads the model (adds ~25s)
+GET /health — {status, default_model, loaded_model, loading_model,
+               device, dtype}
 
 ## Errors
 
@@ -159,8 +232,9 @@ async def usage_guide() -> str:
 async def health() -> dict:
     return {
         "status": "ok",
-        "model": settings.model_id,
-        "loaded": engine.loaded,
+        "default_model": DEFAULT_MODEL,
+        "loaded_model": engine.loaded_model,
+        "loading_model": engine.loading_model,
         "device": engine.device,
         "dtype": str(engine.dtype),
     }

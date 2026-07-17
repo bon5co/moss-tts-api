@@ -25,14 +25,20 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 
 | Method | Path | Notes |
 |--------|------|-------|
+| `GET`  | `/` | Plain-text usage guide aimed at LLM agents |
 | `POST` | `/v1/audio/speech` | OpenAI createSpeech-compatible |
-| `GET`  | `/v1/models` | OpenAI list-models shape |
+| `POST` | `/v1/audio/clone` | Extension: one-shot clone (multipart ref clip + text) |
+| `GET`  | `/v1/models` | Registry with `default`/`loaded`/`loading` flags |
+| `POST` | `/v1/models/preload` | Order a model into memory ahead of first use |
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
-| `GET`  | `/health` | Liveness, device, load state |
+| `GET`  | `/health` | Liveness, device, resident model |
 
 ### OpenAI compatibility notes
 
-- `model` is accepted but ignored — one model per process (`MODEL_ID` env).
+- `model`: short names `moss-tts-v1.5` (8B, default), `moss-tts-local-v1.5`
+  (4B), `moss-tts-local` (1.7B) or full HF ids. One model resident at a
+  time — requesting a non-resident model loads it on the spot (lazy), and
+  unknown names (e.g. `tts-1`) fall back to the default largest model.
 - `voice` maps to a reference clip at `voices/<voice>.wav` for zero-shot
   cloning. `default` (or any unknown name) uses the model's default voice.
 - `response_format`: `wav`, `mp3`, `flac`, `pcm` (24kHz mono s16le).

@@ -22,6 +22,33 @@ from .config import settings
 
 log = logging.getLogger("moss-tts.engine")
 
+# Known MOSS-TTS variants, largest first. Keys are the short names accepted
+# in the `model` request field (full HF ids work too). One model is resident
+# at a time; requesting a different one swaps it in.
+MODELS: dict[str, str] = {
+    "moss-tts-v1.5": "OpenMOSS-Team/MOSS-TTS-v1.5",  # 8B — default
+    "moss-tts-local-v1.5": "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",  # 4B
+    "moss-tts-local": "OpenMOSS-Team/MOSS-TTS-Local-Transformer",  # 1.7B
+}
+# Env MODEL_ID overrides; ships as the 8B flagship (largest).
+DEFAULT_MODEL = settings.model_id
+
+
+def resolve_model_id(requested: str | None) -> str:
+    """Map a request's `model` field to an HF id.
+
+    Accepts short names and full HF ids; anything unknown (e.g. an OpenAI
+    client sending "tts-1") falls back to the default largest model so
+    stock clients work unmodified.
+    """
+    if not requested:
+        return DEFAULT_MODEL
+    if requested in MODELS:
+        return MODELS[requested]
+    if requested in MODELS.values():
+        return requested
+    return DEFAULT_MODEL
+
 
 def _resolve_device(name: str) -> str:
     if name != "auto":
@@ -44,52 +71,89 @@ def _resolve_dtype(name: str, device: str) -> torch.dtype:
 
 
 class Engine:
+    """One resident model; requesting a different variant swaps it in."""
+
     def __init__(self) -> None:
         self._model = None
         self._processor = None
-        self._load_lock = threading.Lock()
-        self._generate_lock = threading.Lock()
+        self._model_id: str | None = None
+        self._loading_id: str | None = None
+        # One lock for load AND generate: a swap must never run while a
+        # generate is in flight (the resident model would be freed mid-use).
+        self._lock = threading.RLock()
         self.device = _resolve_device(settings.device)
         self.dtype = _resolve_dtype(settings.dtype, self.device)
 
     @property
-    def loaded(self) -> bool:
-        return self._model is not None
+    def loaded_model(self) -> str | None:
+        return self._model_id
 
-    def _ensure_loaded(self) -> None:
-        if self._model is not None:
+    @property
+    def loading_model(self) -> str | None:
+        return self._loading_id
+
+    def ensure_loaded(self, model_id: str) -> None:
+        """Blocking. Loads model_id, swapping out any other resident model."""
+        if self._model_id == model_id:
             return
-        with self._load_lock:
-            if self._model is not None:
+        with self._lock:
+            if self._model_id == model_id:
                 return
             from transformers import AutoModel, AutoProcessor
 
-            t0 = time.time()
-            log.info("loading %s on %s (%s)", settings.model_id, self.device, self.dtype)
-            processor = AutoProcessor.from_pretrained(
-                settings.model_id, trust_remote_code=True
-            )
-            processor.audio_tokenizer = processor.audio_tokenizer.to(self.device)
-            model = AutoModel.from_pretrained(
-                settings.model_id,
-                trust_remote_code=True,
-                dtype=self.dtype,
-                attn_implementation=settings.attn_implementation,
-            ).to(self.device)
-            model.eval()
-            self._processor = processor
-            self._model = model
-            log.info("model loaded in %.1fs", time.time() - t0)
+            self._loading_id = model_id
+            try:
+                if self._model is not None:
+                    log.info("unloading %s", self._model_id)
+                    self._model = None
+                    self._processor = None
+                    self._model_id = None
+                    if self.device == "mps":
+                        torch.mps.empty_cache()
+                    elif self.device == "cuda":
+                        torch.cuda.empty_cache()
 
-    def synthesize(self, text: str, reference_wav: Path | None = None) -> tuple[np.ndarray, int]:
+                t0 = time.time()
+                log.info("loading %s on %s (%s)", model_id, self.device, self.dtype)
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                processor.audio_tokenizer = processor.audio_tokenizer.to(self.device)
+                model = AutoModel.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    dtype=self.dtype,
+                    attn_implementation=settings.attn_implementation,
+                ).to(self.device)
+                model.eval()
+                self._processor = processor
+                self._model = model
+                self._model_id = model_id
+                log.info("model loaded in %.1fs", time.time() - t0)
+            finally:
+                self._loading_id = None
+
+    def preload_async(self, model_id: str) -> bool:
+        """Kick a background load. Returns False if already resident."""
+        if self._model_id == model_id:
+            return False
+        threading.Thread(
+            target=self.ensure_loaded, args=(model_id,), daemon=True
+        ).start()
+        return True
+
+    def synthesize(
+        self,
+        text: str,
+        reference_wav: Path | None = None,
+        model_id: str | None = None,
+    ) -> tuple[np.ndarray, int]:
         """Blocking. Returns (mono float32 waveform, sample_rate)."""
-        self._ensure_loaded()
-        processor = self._processor
-        reference = [str(reference_wav)] if reference_wav else None
-        message = processor.build_user_message(text=text, reference=reference)
-        batch = processor([[message]], mode="generation")
+        with self._lock:
+            self.ensure_loaded(model_id or DEFAULT_MODEL)
+            processor = self._processor
+            reference = [str(reference_wav)] if reference_wav else None
+            message = processor.build_user_message(text=text, reference=reference)
+            batch = processor([[message]], mode="generation")
 
-        with self._generate_lock:
             t0 = time.time()
             with torch.no_grad():
                 outputs = self._model.generate(
@@ -99,7 +163,7 @@ class Engine:
                 )
             log.info("generated in %.1fs", time.time() - t0)
 
-        decoded = processor.decode(outputs)[0]
+            decoded = processor.decode(outputs)[0]
         wav = decoded.audio_codes_list[0].float().cpu().numpy()
         if wav.ndim > 1:
             wav = wav.squeeze()
