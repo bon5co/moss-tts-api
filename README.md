@@ -1,5 +1,7 @@
 # moss-tts-api
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/moss-tts-voice-cloning-api-cpu-openai-co?referralCode=Z1xivh&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 OpenAI-compatible TTS server backed by a local
 [MOSS-TTS-v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5) (8B) model.
 No cloud — inference runs on the local GPU (CUDA / Apple Silicon MPS / CPU).
