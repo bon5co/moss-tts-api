@@ -25,7 +25,15 @@ from pydantic import BaseModel, Field
 
 from .auth import require_auth
 from .config import settings
-from .engine import DEFAULT_MODEL, MODELS, encode_wav, engine, resolve_model_id
+from .engine import (
+    DEFAULT_MODEL,
+    MODELS,
+    SOUND_EFFECT_MODELS,
+    encode_wav,
+    engine,
+    resolve_model_id,
+    resolve_sound_effect_model_id,
+)
 
 router = APIRouter()
 
@@ -132,6 +140,42 @@ async def clone_speech(
     return _audio_response(wav, sr, response_format)
 
 
+class SoundEffectRequest(BaseModel):
+    input: str = Field(min_length=1, max_length=2048, description="sound description")
+    seconds: float = Field(10.0, ge=1.0, le=30.0)
+    model: str = ""
+    response_format: str = "wav"
+    num_inference_steps: int = Field(100, ge=10, le=200)
+    cfg_scale: float = Field(4.0, ge=1.0, le=10.0)
+
+
+@router.post("/v1/audio/sound-effect", dependencies=[Depends(require_auth)])
+async def create_sound_effect(req: SoundEffectRequest) -> Response:
+    """Not an OpenAI route — text-to-sound-effect (MOSS-SoundEffect DiT, 48kHz)."""
+    if req.response_format not in MEDIA_TYPES:
+        raise HTTPException(
+            400,
+            f"response_format '{req.response_format}' not supported; "
+            f"use one of {sorted(MEDIA_TYPES)}",
+        )
+    model_id = resolve_sound_effect_model_id(req.model)
+    if model_id is None:
+        raise HTTPException(
+            422,
+            f"unknown sound-effect model '{req.model}' — available: "
+            f"{', '.join(SOUND_EFFECT_MODELS)}; omit or send \"\" for the default.",
+        )
+    wav, sr = await asyncio.to_thread(
+        engine.synthesize_sound_effect,
+        req.input,
+        req.seconds,
+        model_id,
+        req.num_inference_steps,
+        req.cfg_scale,
+    )
+    return _audio_response(wav, sr, req.response_format)
+
+
 class PreloadRequest(BaseModel):
     model: str = ""
 
@@ -139,8 +183,12 @@ class PreloadRequest(BaseModel):
 @router.post("/v1/models/preload", dependencies=[Depends(require_auth)])
 async def preload_model(req: PreloadRequest) -> dict:
     """Order a model into memory ahead of the first inference call."""
-    model_id = _resolve_model_or_422(req.model)
-    started = engine.preload_async(model_id)
+    sfx_id = None if not req.model else resolve_sound_effect_model_id(req.model)
+    if req.model and sfx_id:
+        model_id, kind = sfx_id, "sfx"
+    else:
+        model_id, kind = _resolve_model_or_422(req.model), "tts"
+    started = engine.preload_async(model_id, kind)
     return {
         "model": model_id,
         "status": "loading" if started else "already-loaded",
@@ -152,6 +200,8 @@ async def list_models() -> dict:
     ids = list(MODELS.values())
     if DEFAULT_MODEL not in ids:
         ids.insert(0, DEFAULT_MODEL)
+    entries = [(model_id, "tts") for model_id in ids]
+    entries += [(model_id, "sound-effect") for model_id in SOUND_EFFECT_MODELS.values()]
     return {
         "object": "list",
         "data": [
@@ -160,11 +210,12 @@ async def list_models() -> dict:
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "openmoss",
+                "kind": kind,
                 "default": model_id == DEFAULT_MODEL,
                 "loaded": engine.loaded_model == model_id,
                 "loading": engine.loading_model == model_id,
             }
-            for model_id in ids
+            for model_id, kind in entries
         ],
     }
 
@@ -280,14 +331,33 @@ Two ways:
     curl -s -X POST http://localhost:8766/v1/audio/clone \\
       -F input="Text in the cloned voice." -F file=@ref.wav -o out.wav
 
+## Sound effects
+
+POST /v1/audio/sound-effect          (Content-Type: application/json)
+
+    {
+      "input": "Rain on a tin roof with distant thunder.",  // required
+      "seconds": 10,                    // 1-30, target duration
+      "response_format": "wav",         // wav | mp3 | flac | pcm
+      "num_inference_steps": 100,       // 10-200; fewer = faster, rougher
+      "cfg_scale": 4.0,                 // 1-10 prompt adherence
+      "model": ""                       // empty = moss-soundeffect-v2.0
+    }
+
+Text-to-audio, not speech — describes a sound scene (48kHz output).
+Uses a separate 1.3B diffusion model; requesting it swaps out the TTS
+model (single-resident memory rule), so alternating speech and sound
+effect calls pays a model swap each time.
+
 ## Models
 
-Only MOSS-TTS models are served. Available:
+Only MOSS models are served. Available:
 
     moss-tts-local        OpenMOSS-Team/MOSS-TTS-Local-Transformer       1.7B
     moss-tts-local-v1.5   OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5  4B (48kHz stereo)
     moss-tts              OpenMOSS-Team/MOSS-TTS                         8B (v1.0)
     moss-tts-v1.5         OpenMOSS-Team/MOSS-TTS-v1.5                    8B
+    moss-soundeffect-v2.0 OpenMOSS-Team/MOSS-SoundEffect-v2.0            1.3B (sound effects)
 
 `model` accepts a short name, a full HF id, or empty/omitted for the
 server's configured default. Anything else (e.g. "tts-1") = 422 listing

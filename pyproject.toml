@@ -6,6 +6,7 @@ dependencies = [
     "accelerate>=1.14.0",
     "fastapi>=0.139.2",
     "librosa>=0.11.0",
+    "moss-soundeffect-v2",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.32",
     "soundfile>=0.14.0",
@@ -15,3 +16,12 @@ dependencies = [
     "transformers>=5.0.0",
     "uvicorn[standard]>=0.51.0",
 ]
+
+[tool.uv]
+# moss-soundeffect-v2 pins transformers==4.57.1; the TTS models need >=5.
+# Force 5.x — the soundeffect pipeline's Qwen3 encoder exists there too
+# (verified by generation test).
+override-dependencies = ["transformers>=5.0.0", "soundfile>=0.13.1", "torch>=2.11.0", "torchaudio>=2.11.0", "numpy>=2.0"]
+
+[tool.uv.sources]
+moss-soundeffect-v2 = { git = "https://github.com/OpenMOSS/MOSS-TTS.git", subdirectory = "moss_soundeffect_v2" }

@@ -34,6 +34,7 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 | `POST` | `/v1/models/preload` | Order a model into memory ahead of first use |
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
 | `PUT`  | `/v1/voices/{name}` | Extension: register/replace a named voice (multipart clip) |
+| `POST` | `/v1/audio/sound-effect` | Extension: text-to-sound-effect (48kHz) |
 | `GET`  | `/health` | Liveness, device, resident model |
 
 ### OpenAI compatibility notes
@@ -51,10 +52,10 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 
   (plus a shared MOSS audio tokenizer, ~7GB download, loaded alongside every
   variant). One model resident at a time — requesting a non-resident model
-  loads it on the spot (lazy). The wider MOSS family (TTSD dialogue,
-  VoiceGenerator, SoundEffect, Realtime, Nano — see
-  [OpenMOSS/MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS)) uses different
-  task interfaces and is not served here.
+  loads it on the spot (lazy). Sound effects are served too (below); the
+  rest of the MOSS family (TTSD dialogue, VoiceGenerator, Realtime, Nano —
+  see [OpenMOSS/MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS)) uses
+  different task interfaces and is not served here.
 - `voice` maps to a reference clip at `voices/<voice>.wav` for zero-shot
   cloning. `default` (or any unknown name) uses the model's default voice.
 - `response_format`: `wav`, `mp3`, `flac`, `pcm` (24kHz mono s16le).
@@ -116,6 +117,26 @@ unknown names fall back to `MODEL_ID`). The 8B/4B variants need more RAM
 (16GB+ in bfloat16) and are painfully slow without a GPU. First request
 after deploy downloads model weights (~3.5GB for 1.7B) into the volume;
 watch progress in the deploy logs or preload via `POST /v1/models/preload`.
+
+## Sound effects
+
+`POST /v1/audio/sound-effect` serves
+[MOSS-SoundEffect-v2.0](https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0)
+(1.3B DiT + flow matching, 48kHz, 1–30s per call):
+
+```bash
+curl -X POST http://localhost:8766/v1/audio/sound-effect \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Rain on a tin roof with distant thunder.", "seconds": 8}' \
+  -o rain.wav
+```
+
+Params: `seconds` (1–30), `num_inference_steps` (10–200, default 100),
+`cfg_scale` (1–10, default 4.0), `response_format` as for speech. The
+single-resident rule applies — a sound-effect call swaps out the TTS model
+and vice versa. Dependency note: `moss_soundeffect_v2` pins exact dep
+versions; `[tool.uv] override-dependencies` in `pyproject.toml` forces the
+transformers 5.x the TTS path needs (verified working).
 
 More advanced MOSS capabilities (duration control, Pinyin/IPA pronunciation,
 code-switching) can be exposed later as non-OpenAI routes under `/v1/moss/*`.
