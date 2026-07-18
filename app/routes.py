@@ -37,7 +37,10 @@ MEDIA_TYPES = {
 
 
 class SpeechRequest(BaseModel):
-    model: str = "moss-tts-v1.5"
+    # Empty = the server's MODEL_ID default. A concrete short name here
+    # would silently swap in that model (the 8B flagship OOMs small hosts)
+    # whenever a client omits the field.
+    model: str = ""
     input: str = Field(min_length=1, max_length=4096)
     voice: str = "default"
     response_format: str = "wav"
