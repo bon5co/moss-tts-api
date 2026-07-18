@@ -10,11 +10,14 @@ back to the model's default voice.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
+import soundfile as sf
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
@@ -152,8 +155,66 @@ async def list_models() -> dict:
 @router.get("/v1/voices", dependencies=[Depends(require_auth)])
 async def list_voices() -> dict:
     """Not an OpenAI route — lists reference clips available for cloning."""
-    names = sorted(p.stem for p in Path(settings.voices_dir).glob("*.wav"))
+    voices_dir = Path(settings.voices_dir)
+    names = sorted(p.stem for p in voices_dir.glob("*.wav")) if voices_dir.is_dir() else []
     return {"voices": ["default", *names]}
+
+
+VOICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+MAX_VOICE_UPLOAD_BYTES = 20 * 1024 * 1024
+MIN_VOICE_SECONDS = 1.0
+MAX_VOICE_SECONDS = 60.0
+
+
+@router.put("/v1/voices/{name}", dependencies=[Depends(require_auth)])
+async def put_voice(
+    name: str,
+    file: UploadFile = File(description="reference clip (wav/mp3/flac), ideally 5-15s"),
+) -> dict:
+    """Not an OpenAI route — register or replace a named reference clip.
+
+    The clip is transcoded to wav and stored at <voices_dir>/<name>.wav, so
+    it survives restarts when voices_dir sits on a persistent volume and is
+    immediately usable as `"voice": "<name>"` in /v1/audio/speech.
+    """
+    if not VOICE_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "voice name must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+    if name == "default":
+        raise HTTPException(400, "'default' is reserved for the model's built-in voice")
+    raw = await file.read()
+    if len(raw) > MAX_VOICE_UPLOAD_BYTES:
+        raise HTTPException(413, "reference clip too large (max 20MB)")
+
+    voices_dir = Path(settings.voices_dir)
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    # Transcode to wav in a temp file, then atomically replace the target so
+    # a concurrent synthesis never reads a half-written clip.
+    with tempfile.NamedTemporaryFile(
+        suffix=".wav", dir=voices_dir, delete=False
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", "pipe:0", "-f", "wav", str(tmp_path)],
+            input=raw, capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(
+                400, f"could not decode reference clip: {proc.stderr.decode()[:200]}"
+            )
+        info = sf.info(str(tmp_path))
+        seconds = info.frames / info.samplerate
+        if not MIN_VOICE_SECONDS <= seconds <= MAX_VOICE_SECONDS:
+            raise HTTPException(
+                400,
+                f"reference clip is {seconds:.1f}s; must be "
+                f"{MIN_VOICE_SECONDS:g}-{MAX_VOICE_SECONDS:g}s (5-15s works best)",
+            )
+        os.replace(tmp_path, voices_dir / f"{name}.wav")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return {"voice": name, "seconds": round(seconds, 2)}
 
 
 USAGE_GUIDE = """\
@@ -188,8 +249,13 @@ OpenAI SDKs work by overriding base_url to http://localhost:8766/v1.
 Two ways:
 
 1. Named voice: GET /v1/voices lists reference clips; pass one as "voice"
-   in /v1/audio/speech. New voices = drop a 5-15s clean WAV into the
-   server's voices/ directory; picked up immediately.
+   in /v1/audio/speech. Register a new voice by uploading a 5-15s clean
+   clip (wav/mp3/flac) — stored persistently, usable immediately:
+
+    curl -s -X PUT http://localhost:8766/v1/voices/alice \\
+      -F file=@ref.wav
+
+   (Or drop a WAV into the server's voices/ directory by hand.)
 2. One-shot: POST /v1/audio/clone (multipart/form-data) with fields
    `input` (text), `file` (reference clip), optional `response_format`
    and `model`. Returns audio bytes, nothing is stored.

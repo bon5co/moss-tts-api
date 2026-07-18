@@ -31,6 +31,7 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 | `GET`  | `/v1/models` | Registry with `default`/`loaded`/`loading` flags |
 | `POST` | `/v1/models/preload` | Order a model into memory ahead of first use |
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
+| `PUT`  | `/v1/voices/{name}` | Extension: register/replace a named voice (multipart clip) |
 | `GET`  | `/health` | Liveness, device, resident model |
 
 ### OpenAI compatibility notes
@@ -65,8 +66,39 @@ audio.write_to_file("hello.wav")
 
 ## Voice cloning
 
-Drop a short (5–15s) clean reference clip at `voices/<name>.wav`, then request
-`"voice": "<name>"`. List available names via `GET /v1/voices`.
+Register a short (5–15s) clean reference clip under a name, then request
+`"voice": "<name>"`:
+
+```bash
+curl -X PUT http://localhost:8766/v1/voices/alice -F file=@ref.wav
+```
+
+Accepts wav/mp3/flac (transcoded to wav server-side, 1–60s enforced). Stored
+at `voices/<name>.wav` — dropping a file there by hand works too. List
+available names via `GET /v1/voices`. For a one-shot clone without storing
+anything, use `POST /v1/audio/clone` (multipart clip + text).
+
+## Deploy on Railway
+
+The included `Dockerfile` + `railway.json` deploy CPU-only. Attach a volume
+at **`/data`** — it holds both the HuggingFace model cache (survives
+redeploys, no re-download) and uploaded voices. Set `API_KEY` — the server
+is public on Railway, don't run it open.
+
+On CPU plans use the smallest model. Recommended service variables:
+
+```
+MODEL_ID=OpenMOSS-Team/MOSS-TTS-Local-Transformer   # 1.7B — fits 8GB RAM
+DTYPE=bfloat16                                      # ~3.4GB resident vs ~7GB float32
+MAX_NEW_TOKENS=512                                  # ~40s audio cap; CPU is slow
+API_KEY=<generate one>
+```
+
+and pass `"model": "moss-tts-local"` in requests (or rely on the default —
+unknown names fall back to `MODEL_ID`). The 8B/4B variants need more RAM
+(16GB+ in bfloat16) and are painfully slow without a GPU. First request
+after deploy downloads model weights (~3.5GB for 1.7B) into the volume;
+watch progress in the deploy logs or preload via `POST /v1/models/preload`.
 
 More advanced MOSS capabilities (duration control, Pinyin/IPA pronunciation,
 code-switching) can be exposed later as non-OpenAI routes under `/v1/moss/*`.
