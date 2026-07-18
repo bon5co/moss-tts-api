@@ -81,9 +81,11 @@ anything, use `POST /v1/audio/clone` (multipart clip + text).
 ## Deploy on Railway
 
 The included `Dockerfile` + `railway.json` deploy CPU-only. Attach a volume
-at **`/data`** — it holds both the HuggingFace model cache (survives
-redeploys, no re-download) and uploaded voices. Set `API_KEY` — the server
-is public on Railway, don't run it open.
+at **`/data`** — it persists uploaded voices. Model weights (~13GB for the
+default 1.7B stack) live on ephemeral disk and re-download on each cold
+deploy: Railway Hobby caps volumes at 5GB so the cache can't persist there.
+On Pro, grow the volume and set `HF_HOME=/data/hf` to keep weights across
+deploys. Set `API_KEY` — the server is public on Railway, don't run it open.
 
 On CPU plans use the smallest model. Recommended service variables:
 

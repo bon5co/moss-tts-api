@@ -32,13 +32,15 @@ RUN uv pip install --system \
 COPY app ./app
 COPY voices ./voices
 
-# /data is the persistent volume mount point on Railway: HF model cache and
-# uploaded voices both survive redeploys. Works without a volume too.
+# /data is the persistent volume mount point on Railway; it holds uploaded
+# voices. The HF model cache (~13GB for the default 1.7B stack) deliberately
+# stays on ephemeral disk: Railway Hobby caps volumes at 5GB, so the cache
+# can't fit there — weights re-download on each cold deploy instead. On Pro
+# (bigger volumes) set HF_HOME=/data/hf to persist them.
 # CPU-sized model defaults (this image has no GPU torch): 1.7B in bfloat16
 # fits an 8GB instance; MAX_NEW_TOKENS caps runaway CPU generations (~40s
 # audio). Override any of these to go bigger on larger instances.
-ENV HF_HOME=/data/hf \
-    VOICES_DIR=/data/voices \
+ENV VOICES_DIR=/data/voices \
     MODEL_ID=OpenMOSS-Team/MOSS-TTS-Local-Transformer \
     DTYPE=bfloat16 \
     MAX_NEW_TOKENS=512 \
