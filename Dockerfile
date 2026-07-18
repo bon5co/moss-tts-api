@@ -10,8 +10,9 @@
 # ============================================================================
 FROM python:3.12-slim
 
+# git: moss-soundeffect-v2 installs from a git subdirectory source.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
@@ -24,10 +25,22 @@ COPY pyproject.toml ./
 # MOSS remote code is written against transformers 5.0.0 (per the model
 # cards); 5.14 breaks the 1.7B variant's config class. Pin it here — the
 # non-Docker path keeps whatever uv.lock says.
-RUN uv pip install --system \
+# The overrides file mirrors [tool.uv].override-dependencies from
+# pyproject.toml (uv pip doesn't read that table): moss-soundeffect-v2
+# pins exact old versions (transformers==4.57.1, soundfile==0.13.1, ...)
+# that would otherwise be unresolvable against the TTS stack.
+RUN printf '%s\n' \
+        "transformers==5.0.0" \
+        "soundfile>=0.13.1" \
+        "torch>=2.11.0" \
+        "torchaudio>=2.11.0" \
+        "numpy>=2.0" \
+        "tqdm>=4.66" \
+        > /tmp/overrides.txt \
+    && uv pip install --system \
+    --overrides /tmp/overrides.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
-    -r pyproject.toml \
-    "transformers==5.0.0"
+    -r pyproject.toml
 
 COPY app ./app
 COPY voices ./voices
