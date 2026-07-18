@@ -46,6 +46,12 @@ ENV VOICES_DIR=/data/voices \
     MAX_NEW_TOKENS=512 \
     PYTHONUNBUFFERED=1
 
+# Containers report the HOST's core count, so torch would oversubscribe its
+# thread pool on capped vCPU (measured ~5x slowdown on Railway). 8 matches
+# the common 8-vCPU tier; override to your instance's actual vCPU count.
+ENV OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8
+
 EXPOSE 8766
 
 CMD ["python", "-m", "app.main"]
