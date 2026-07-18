@@ -1,10 +1,11 @@
 """OpenAI-compatible audio API.
 
 POST /v1/audio/speech mirrors https://platform.openai.com/docs/api-reference/audio/createSpeech
-— any OpenAI SDK pointed at this server with `base_url` works. The `model`
-field is accepted but ignored (one model per process); `voice` resolves to a
-reference clip in the voices dir for zero-shot cloning, unknown names fall
-back to the model's default voice.
+— any OpenAI SDK pointed at this server with `base_url` works, but `model`
+must be a MOSS name (or empty for the server default) — anything else is
+rejected with 422 listing what's available. `voice` resolves to a reference
+clip in the voices dir for zero-shot cloning, unknown names fall back to
+the model's default voice.
 """
 
 from __future__ import annotations
@@ -47,6 +48,19 @@ class SpeechRequest(BaseModel):
     speed: float = 1.0
 
 
+def _resolve_model_or_422(requested: str) -> str:
+    model_id = resolve_model_id(requested)
+    if model_id is None:
+        raise HTTPException(
+            422,
+            f"unknown model '{requested}' — this server only serves MOSS-TTS. "
+            f"Available: {', '.join(MODELS)} (or full ids "
+            f"{', '.join(MODELS.values())}); omit or send \"\" for the "
+            f"server default ({DEFAULT_MODEL}).",
+        )
+    return model_id
+
+
 def _resolve_voice(name: str) -> Path | None:
     if name in ("", "default"):
         return None
@@ -79,7 +93,7 @@ async def create_speech(req: SpeechRequest) -> Response:
         raise HTTPException(400, "speed is not supported by this backend; use 1.0")
 
     reference = _resolve_voice(req.voice)
-    model_id = resolve_model_id(req.model)
+    model_id = _resolve_model_or_422(req.model)
     wav, sr = await asyncio.to_thread(engine.synthesize, req.input, reference, model_id)
     return _audio_response(wav, sr, req.response_format)
 
@@ -111,7 +125,7 @@ async def clone_speech(
         tmp.write(await file.read())
         ref_path = Path(tmp.name)
     try:
-        model_id = resolve_model_id(model)
+        model_id = _resolve_model_or_422(model)
         wav, sr = await asyncio.to_thread(engine.synthesize, input, ref_path, model_id)
     finally:
         ref_path.unlink(missing_ok=True)
@@ -125,7 +139,7 @@ class PreloadRequest(BaseModel):
 @router.post("/v1/models/preload", dependencies=[Depends(require_auth)])
 async def preload_model(req: PreloadRequest) -> dict:
     """Order a model into memory ahead of the first inference call."""
-    model_id = resolve_model_id(req.model)
+    model_id = _resolve_model_or_422(req.model)
     started = engine.preload_async(model_id)
     return {
         "model": model_id,
@@ -235,7 +249,7 @@ POST /v1/audio/speech            (Content-Type: application/json)
       "input": "Text to speak.",        // required, 1-4096 chars
       "voice": "default",               // or a name from GET /v1/voices
       "response_format": "wav",         // wav | mp3 | flac | pcm
-      "model": "moss-tts-v1.5",         // see Models below; unknown → default
+      "model": "",                      // omit/empty = server default; see Models
       "speed": 1.0                      // only 1.0 supported; else 400
     }
 
@@ -268,11 +282,18 @@ Two ways:
 
 ## Models
 
-One model is resident in memory at a time; the default is the largest
-(8B, moss-tts-v1.5). Short names: moss-tts-v1.5 (8B), moss-tts-local-v1.5
-(4B), moss-tts-local (1.7B). Requesting a non-resident model on inference
-loads it first (slow — swap + load; first ever use also downloads
-weights). Unknown model names (e.g. "tts-1") resolve to the default.
+Only MOSS-TTS models are served. Available:
+
+    moss-tts-local        OpenMOSS-Team/MOSS-TTS-Local-Transformer       1.7B
+    moss-tts-local-v1.5   OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5  4B (48kHz stereo)
+    moss-tts              OpenMOSS-Team/MOSS-TTS                         8B (v1.0)
+    moss-tts-v1.5         OpenMOSS-Team/MOSS-TTS-v1.5                    8B
+
+`model` accepts a short name, a full HF id, or empty/omitted for the
+server's configured default. Anything else (e.g. "tts-1") = 422 listing
+the available models. One model is resident in memory at a time;
+requesting a non-resident model on inference loads it first (slow —
+swap + load; first ever use also downloads weights).
 
 GET  /v1/models          — registry with default/loaded/loading flags
 POST /v1/models/preload  — {"model": "..."} (empty = default); starts a
@@ -288,7 +309,8 @@ GET /health — {status, default_model, loaded_model, loading_model,
 
 Plain JSON: {"detail": "reason"}. 400 = bad parameter (unsupported format
 or speed), 401 = missing/wrong bearer token (only when auth is enabled),
-422 = schema violation (e.g. empty input), 500 = engine failure.
+422 = schema violation (empty input, non-MOSS model name), 500 = engine
+failure.
 """
 
 

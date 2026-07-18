@@ -26,20 +26,21 @@ log = logging.getLogger("moss-tts.engine")
 # in the `model` request field (full HF ids work too). One model is resident
 # at a time; requesting a different one swaps it in.
 MODELS: dict[str, str] = {
-    "moss-tts-v1.5": "OpenMOSS-Team/MOSS-TTS-v1.5",  # 8B — default
-    "moss-tts-local-v1.5": "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",  # 4B
-    "moss-tts-local": "OpenMOSS-Team/MOSS-TTS-Local-Transformer",  # 1.7B
+    "moss-tts-v1.5": "OpenMOSS-Team/MOSS-TTS-v1.5",  # 8B, MossTTSDelay
+    "moss-tts": "OpenMOSS-Team/MOSS-TTS",  # 8B, MossTTSDelay (1.0)
+    "moss-tts-local-v1.5": "OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",  # 4B, MossTTSLocal, 48kHz stereo
+    "moss-tts-local": "OpenMOSS-Team/MOSS-TTS-Local-Transformer",  # 1.7B, MossTTSLocal
 }
 # Env MODEL_ID overrides; ships as the 8B flagship (largest).
 DEFAULT_MODEL = settings.model_id
 
 
-def resolve_model_id(requested: str | None) -> str:
+def resolve_model_id(requested: str | None) -> str | None:
     """Map a request's `model` field to an HF id.
 
-    Accepts short names and full HF ids; anything unknown (e.g. an OpenAI
-    client sending "tts-1") falls back to the default largest model so
-    stock clients work unmodified.
+    Empty/None = the server's configured default. Accepts short names and
+    full HF ids; anything else returns None — only MOSS models are served,
+    so callers reject unknown names (422) instead of silently substituting.
     """
     if not requested:
         return DEFAULT_MODEL
@@ -47,7 +48,7 @@ def resolve_model_id(requested: str | None) -> str:
         return MODELS[requested]
     if requested in MODELS.values():
         return requested
-    return DEFAULT_MODEL
+    return None
 
 
 def _resolve_device(name: str) -> str:

@@ -36,10 +36,23 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 
 ### OpenAI compatibility notes
 
-- `model`: short names `moss-tts-v1.5` (8B, default), `moss-tts-local-v1.5`
-  (4B), `moss-tts-local` (1.7B) or full HF ids. One model resident at a
-  time — requesting a non-resident model loads it on the spot (lazy), and
-  unknown names (e.g. `tts-1`) fall back to the default largest model.
+- `model`: only MOSS models are served — omit/empty = the server's
+  `MODEL_ID` default; anything non-MOSS (e.g. `tts-1`) is rejected with 422
+  listing the available models:
+
+  | Short name | HF id | Params | RAM (bf16) |
+  |---|---|---|---|
+  | `moss-tts-local` | `OpenMOSS-Team/MOSS-TTS-Local-Transformer` | 1.7B | ~3.4GB |
+  | `moss-tts-local-v1.5` | `OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` | 4B, 48kHz stereo | ~8GB |
+  | `moss-tts` | `OpenMOSS-Team/MOSS-TTS` | 8B (v1.0) | ~16GB |
+  | `moss-tts-v1.5` | `OpenMOSS-Team/MOSS-TTS-v1.5` | 8B | ~16GB |
+
+  (plus a shared MOSS audio tokenizer, ~7GB download, loaded alongside every
+  variant). One model resident at a time — requesting a non-resident model
+  loads it on the spot (lazy). The wider MOSS family (TTSD dialogue,
+  VoiceGenerator, SoundEffect, Realtime, Nano — see
+  [OpenMOSS/MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS)) uses different
+  task interfaces and is not served here.
 - `voice` maps to a reference clip at `voices/<voice>.wav` for zero-shot
   cloning. `default` (or any unknown name) uses the model's default voice.
 - `response_format`: `wav`, `mp3`, `flac`, `pcm` (24kHz mono s16le).
