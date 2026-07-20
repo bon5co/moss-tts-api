@@ -30,6 +30,7 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 | `GET`  | `/` | Plain-text usage guide aimed at LLM agents |
 | `POST` | `/v1/audio/speech` | OpenAI createSpeech-compatible |
 | `POST` | `/v1/audio/clone` | Extension: one-shot clone (multipart ref clip + text) |
+| `POST` | `/v1/audio/voice-design` | Extension: instruction-driven voice, no reference audio |
 | `GET`  | `/v1/models` | Registry with `default`/`loaded`/`loading` flags |
 | `POST` | `/v1/models/preload` | Order a model into memory ahead of first use |
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
@@ -52,8 +53,9 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 
   (plus a shared MOSS audio tokenizer, ~7GB download, loaded alongside every
   variant). One model resident at a time — requesting a non-resident model
-  loads it on the spot (lazy). Sound effects are served too (below); the
-  rest of the MOSS family (TTSD dialogue, VoiceGenerator, Realtime, Nano —
+  loads it on the spot (lazy). Sound effects and instruction-driven voice
+  design are served too (below); the rest of the MOSS family (TTSD dialogue,
+  Realtime, Nano —
   see [OpenMOSS/MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS)) uses
   different task interfaces and is not served here.
 - `voice` maps to a reference clip at `voices/<voice>.wav` for zero-shot
@@ -93,6 +95,24 @@ Accepts wav/mp3/flac (transcoded to wav server-side, 1–60s enforced). Stored
 at `voices/<name>.wav` — dropping a file there by hand works too. List
 available names via `GET /v1/voices`. For a one-shot clone without storing
 anything, use `POST /v1/audio/clone` (multipart clip + text).
+
+## Voice design
+
+Describe the desired voice and delivery without supplying a reference clip:
+
+```bash
+curl -X POST http://localhost:8766/v1/audio/voice-design \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "บางครั้งความจริงอาจถูกตัดสินจากเพียงสิ่งที่ตาเห็น",
+    "instruction": "Warm, composed Thai female narrator, age 35, clear articulation, emotionally restrained moral-drama delivery.",
+    "response_format": "wav"
+  }' \
+  -o voice-designed.wav
+```
+
+The first request downloads and loads MOSS-VoiceGenerator. Switching back
+to `/v1/audio/speech` reloads the configured TTS model.
 
 ## Deploy on Railway
 

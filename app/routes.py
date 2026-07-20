@@ -29,6 +29,7 @@ from .engine import (
     DEFAULT_MODEL,
     MODELS,
     SOUND_EFFECT_MODELS,
+    VOICE_GENERATOR_MODEL,
     encode_wav,
     engine,
     resolve_model_id,
@@ -112,6 +113,37 @@ def _audio_response(wav, sr: int, fmt: str) -> Response:
     else:
         body = encode_wav(wav, sr, fmt)
     return Response(content=body, media_type=MEDIA_TYPES[fmt])
+
+
+class VoiceDesignRequest(BaseModel):
+    input: str = Field(min_length=1, max_length=4096)
+    instruction: str = Field(min_length=1, max_length=2048)
+    response_format: str = "wav"
+    temperature: float = Field(default=1.5, ge=0.1, le=3.0)
+    top_p: float = Field(default=0.6, ge=0.1, le=1.0)
+    top_k: int = Field(default=50, ge=1, le=200)
+    repetition_penalty: float = Field(default=1.1, ge=0.8, le=2.0)
+
+
+@router.post("/v1/audio/voice-design", dependencies=[Depends(require_auth)])
+async def create_voice_design(req: VoiceDesignRequest) -> Response:
+    """Synthesize speech from text plus a voice/style description."""
+    if req.response_format not in MEDIA_TYPES:
+        raise HTTPException(
+            400,
+            f"response_format '{req.response_format}' not supported; "
+            f"use one of {sorted(MEDIA_TYPES)}",
+        )
+    wav, sr = await asyncio.to_thread(
+        engine.design_voice,
+        req.input,
+        req.instruction,
+        req.temperature,
+        req.top_p,
+        req.top_k,
+        req.repetition_penalty,
+    )
+    return _audio_response(wav, sr, req.response_format)
 
 
 @router.post("/v1/audio/clone", dependencies=[Depends(require_auth)])
@@ -349,6 +381,20 @@ Uses a separate 1.3B diffusion model; requesting it swaps out the TTS
 model (single-resident memory rule), so alternating speech and sound
 effect calls pays a model swap each time.
 
+## Voice design (no reference audio)
+
+POST /v1/audio/voice-design with the text plus a natural-language
+description of the desired voice. This swaps in the 1.7B
+OpenMOSS-Team/MOSS-VoiceGenerator model:
+
+    curl -s -X POST http://localhost:8766/v1/audio/voice-design \\
+      -H "Content-Type: application/json" \\
+      -d '{"input":"ข้อความภาษาไทย","instruction":"Warm, composed Thai female narrator, age 35, clear articulation, emotionally restrained moral-drama delivery.","response_format":"wav"}' \\
+      -o out.wav
+
+Optional sampling fields use the official defaults: `temperature` 1.5,
+`top_p` 0.6, `top_k` 50, and `repetition_penalty` 1.1.
+
 ## Models
 
 Only MOSS models are served. Available:
@@ -358,6 +404,7 @@ Only MOSS models are served. Available:
     moss-tts              OpenMOSS-Team/MOSS-TTS                         8B (v1.0)
     moss-tts-v1.5         OpenMOSS-Team/MOSS-TTS-v1.5                    8B
     moss-soundeffect-v2.0 OpenMOSS-Team/MOSS-SoundEffect-v2.0            1.3B (sound effects)
+    voice design          OpenMOSS-Team/MOSS-VoiceGenerator              1.7B
 
 `model` accepts a short name, a full HF id, or empty/omitted for the
 server's configured default. Anything else (e.g. "tts-1") = 422 listing

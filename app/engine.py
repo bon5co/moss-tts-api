@@ -43,6 +43,7 @@ SOUND_EFFECT_MODELS: dict[str, str] = {
 # Env MODEL_ID overrides; ships as the 8B flagship (largest).
 DEFAULT_MODEL = settings.model_id
 DEFAULT_SOUND_EFFECT_MODEL = next(iter(SOUND_EFFECT_MODELS.values()))
+VOICE_GENERATOR_MODEL = "OpenMOSS-Team/MOSS-VoiceGenerator"
 
 
 def resolve_sound_effect_model_id(requested: str | None) -> str | None:
@@ -217,7 +218,13 @@ class Engine:
                 else:
                     from transformers import AutoModel, AutoProcessor
 
-                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                    processor_kwargs = {"trust_remote_code": True}
+                    if model_id == VOICE_GENERATOR_MODEL:
+                        # Required by the official VoiceGenerator example.
+                        processor_kwargs["normalize_inputs"] = True
+                    processor = AutoProcessor.from_pretrained(
+                        model_id, **processor_kwargs
+                    )
                     processor.audio_tokenizer = processor.audio_tokenizer.to(self.device)
                     model = AutoModel.from_pretrained(
                         model_id,
@@ -315,6 +322,57 @@ class Engine:
         if wav.ndim > 1:
             wav = wav.squeeze()
         return wav, processor.model_config.sampling_rate
+
+    def design_voice(
+        self,
+        text: str,
+        instruction: str,
+        temperature: float = 1.5,
+        top_p: float = 0.6,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
+    ) -> tuple[np.ndarray, int]:
+        """Generate speech from a natural-language voice description."""
+        with self._lock:
+            self.ensure_loaded(VOICE_GENERATOR_MODEL)
+            processor = self._processor
+            message = processor.build_user_message(
+                text=text,
+                instruction=instruction,
+            )
+            batch = processor([[message]], mode="generation")
+
+            t0 = time.time()
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    input_ids=batch["input_ids"].to(self.device),
+                    attention_mask=batch["attention_mask"].to(self.device),
+                    max_new_tokens=settings.voice_design_max_new_tokens,
+                    audio_temperature=temperature,
+                    audio_top_p=top_p,
+                    audio_top_k=top_k,
+                    audio_repetition_penalty=repetition_penalty,
+                )
+            log.info("voice design generated in %.1fs", time.time() - t0)
+
+            decoded = processor.decode(outputs)[0]
+            if decoded is None:
+                raise RuntimeError("VoiceGenerator returned no decodable audio")
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+
+        wav = decoded.audio_codes_list[0]
+        if isinstance(wav, torch.Tensor):
+            wav = wav.detach().float().cpu().numpy()
+        else:
+            wav = np.asarray(wav, dtype=np.float32)
+        if wav.ndim > 1:
+            wav = wav.reshape(-1)
+        return wav.astype(np.float32, copy=False), int(
+            getattr(processor.model_config, "sampling_rate", 24000)
+        )
 
 
 def encode_wav(wav: np.ndarray, sample_rate: int, fmt: str) -> bytes:

@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     dtype: str = "auto"  # auto | bfloat16 | float16 | float32
     attn_implementation: str = "sdpa"
     max_new_tokens: int = 2048  # ~163s of audio at 12.5 tok/s
+    voice_design_max_new_tokens: int = 4096
 
     # Directory of reference clips for voice cloning; `voice` request param
     # resolves to <voices_dir>/<voice>.wav.
