@@ -55,6 +55,11 @@ class SpeechRequest(BaseModel):
     voice: str = "default"
     response_format: str = "wav"
     speed: float = 1.0
+    # Extension: generation language, passed straight through to MOSS-TTS
+    # (plain names like "Japanese", "French" — 31 supported upstream).
+    # Omitted/None = server default (DEFAULT_LANGUAGE), else the model
+    # infers the language from the text as it always has.
+    language: str | None = Field(default=None, max_length=64)
 
 
 def _resolve_model_or_422(requested: str) -> str:
@@ -103,7 +108,9 @@ async def create_speech(req: SpeechRequest) -> Response:
 
     reference = _resolve_voice(req.voice)
     model_id = _resolve_model_or_422(req.model)
-    wav, sr = await asyncio.to_thread(engine.synthesize, req.input, reference, model_id)
+    wav, sr = await asyncio.to_thread(
+        engine.synthesize, req.input, reference, model_id, req.language
+    )
     return _audio_response(wav, sr, req.response_format)
 
 
@@ -152,6 +159,10 @@ async def clone_speech(
     file: UploadFile = File(description="reference clip (wav/mp3/flac), 5-15s"),
     response_format: str = Form("wav"),
     model: str = Form(""),
+    language: str | None = Form(
+        None, max_length=64,
+        description='generation language, e.g. "Japanese" (default: server DEFAULT_LANGUAGE)',
+    ),
 ) -> Response:
     """One-shot voice clone: multipart reference clip + text, no registration."""
     if response_format not in MEDIA_TYPES:
@@ -166,7 +177,9 @@ async def clone_speech(
         ref_path = Path(tmp.name)
     try:
         model_id = _resolve_model_or_422(model)
-        wav, sr = await asyncio.to_thread(engine.synthesize, input, ref_path, model_id)
+        wav, sr = await asyncio.to_thread(
+            engine.synthesize, input, ref_path, model_id, language
+        )
     finally:
         ref_path.unlink(missing_ok=True)
     return _audio_response(wav, sr, response_format)
@@ -333,8 +346,14 @@ POST /v1/audio/speech            (Content-Type: application/json)
       "voice": "default",               // or a name from GET /v1/voices
       "response_format": "wav",         // wav | mp3 | flac | pcm
       "model": "",                      // omit/empty = server default; see Models
-      "speed": 1.0                      // only 1.0 supported; else 400
+      "speed": 1.0,                     // only 1.0 supported; else 400
+      "language": "Japanese"            // optional; omit = model infers it
     }
+
+`language` is a plain language name passed straight to the model —
+MOSS-TTS-v1.5 supports 31 of them (Chinese, English, Japanese, Korean,
+French, German, Thai, ...). Omit it to keep the model's own detection.
+The server's DEFAULT_LANGUAGE env var fills it in when omitted.
 
 Response body = raw audio bytes (24kHz mono; pcm = s16le). Save to file:
 
@@ -357,8 +376,8 @@ Two ways:
 
    (Or drop a WAV into the server's voices/ directory by hand.)
 2. One-shot: POST /v1/audio/clone (multipart/form-data) with fields
-   `input` (text), `file` (reference clip), optional `response_format`
-   and `model`. Returns audio bytes, nothing is stored.
+   `input` (text), `file` (reference clip), optional `response_format`,
+   `model` and `language`. Returns audio bytes, nothing is stored.
 
     curl -s -X POST http://localhost:8766/v1/audio/clone \\
       -F input="Text in the cloned voice." -F file=@ref.wav -o out.wav
@@ -394,6 +413,9 @@ OpenMOSS-Team/MOSS-VoiceGenerator model:
 
 Optional sampling fields use the official defaults: `temperature` 1.5,
 `top_p` 0.6, `top_k` 50, and `repetition_penalty` 1.1.
+
+No `language` field here: MOSS-VoiceGenerator supports Chinese and
+English only. Use `instruction` to describe the delivery instead.
 
 ## Models
 

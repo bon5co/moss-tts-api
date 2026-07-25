@@ -1,8 +1,11 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True
+    )
 
     # Optional bearer token. Empty string = auth disabled (local use).
     api_key: str = ""
@@ -17,6 +20,22 @@ class Settings(BaseSettings):
     # Directory of reference clips for voice cloning; `voice` request param
     # resolves to <voices_dir>/<voice>.wav.
     voices_dir: str = "voices"
+
+    # Optional generation language for the TTS path (/v1/audio/speech and
+    # /v1/audio/clone), applied when a request omits `language`. Upstream
+    # MOSS-TTS-v1.5 accepts plain language names ("Japanese", "French", ...)
+    # across the 31 languages it supports. None means the argument is not
+    # passed at all, letting the model infer the language from the text —
+    # the historical behaviour, kept as the default so nothing changes
+    # unless this is configured.
+    # Not used by /v1/audio/voice-design: MOSS-VoiceGenerator (1.7B) is
+    # Chinese/English only and its build_user_message takes no language.
+    default_language: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "MOSS_DEFAULT_LANGUAGE", "DEFAULT_LANGUAGE", "default_language"
+        ),
+    )
 
     host: str = "0.0.0.0"
     port: int = 8766
