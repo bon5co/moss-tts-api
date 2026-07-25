@@ -8,6 +8,7 @@ interleaving them thrashes memory.
 
 from __future__ import annotations
 
+import inspect
 import io
 import logging
 import os
@@ -44,6 +45,50 @@ SOUND_EFFECT_MODELS: dict[str, str] = {
 DEFAULT_MODEL = settings.model_id
 DEFAULT_SOUND_EFFECT_MODEL = next(iter(SOUND_EFFECT_MODELS.values()))
 VOICE_GENERATOR_MODEL = "OpenMOSS-Team/MOSS-VoiceGenerator"
+
+
+def _build_user_message(processor, *, text: str, reference, language: str | None):
+    """Call processor.build_user_message, passing `language` only when set.
+
+    Upstream MOSS-TTS supports `build_user_message(text=..., language=...)`,
+    but not every processor/model revision does. When `language` is None the
+    call is byte-for-byte the historical one. When it is set but the
+    processor cannot take it, fall back to the language-less call with a
+    warning rather than 500-ing the request: ignoring the hint is strictly
+    better than failing to synthesize.
+    """
+    if language is None:
+        return processor.build_user_message(text=text, reference=reference)
+
+    build = processor.build_user_message
+    try:
+        params = inspect.signature(build).parameters
+        accepts_language = "language" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except (TypeError, ValueError):  # builtins / C-extensions have no signature
+        accepts_language = True
+
+    if not accepts_language:
+        log.warning(
+            "processor %s.build_user_message does not accept `language`; "
+            "ignoring requested language %r",
+            type(processor).__name__,
+            language,
+        )
+        return build(text=text, reference=reference)
+
+    try:
+        return build(text=text, reference=reference, language=language)
+    except TypeError:
+        log.warning(
+            "processor %s.build_user_message rejected `language`; retrying "
+            "without it (requested language %r)",
+            type(processor).__name__,
+            language,
+            exc_info=True,
+        )
+        return build(text=text, reference=reference)
 
 
 def resolve_sound_effect_model_id(requested: str | None) -> str | None:
@@ -291,13 +336,24 @@ class Engine:
         text: str,
         reference_wav: Path | None = None,
         model_id: str | None = None,
+        language: str | None = None,
     ) -> tuple[np.ndarray, int]:
-        """Blocking. Returns (mono float32 waveform, sample_rate)."""
+        """Blocking. Returns (mono float32 waveform, sample_rate).
+
+        `language` names the generation language (upstream takes plain names
+        like "Japanese" or "French"; MOSS-TTS-v1.5 supports 31 of them).
+        When it is None — including when no default is configured — the
+        processor is called exactly as before and the model infers the
+        language from the text.
+        """
+        language = language or settings.default_language
         with self._lock:
             self.ensure_loaded(model_id or DEFAULT_MODEL)
             processor = self._processor
             reference = [str(reference_wav)] if reference_wav else None
-            message = processor.build_user_message(text=text, reference=reference)
+            message = _build_user_message(
+                processor, text=text, reference=reference, language=language
+            )
             batch = processor([[message]], mode="generation")
 
             t0 = time.time()
@@ -336,6 +392,12 @@ class Engine:
         with self._lock:
             self.ensure_loaded(VOICE_GENERATOR_MODEL)
             processor = self._processor
+            # Deliberately no `language=` here. This path runs
+            # MOSS-VoiceGenerator (1.7B), which supports Chinese and English
+            # only and whose build_user_message accepts just `text` and
+            # `instruction` — passing a language would raise TypeError. The
+            # language passthrough belongs to the 8B MOSS-TTS-v1.5 path in
+            # synthesize() above.
             message = processor.build_user_message(
                 text=text,
                 instruction=instruction,

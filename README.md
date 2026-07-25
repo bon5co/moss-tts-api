@@ -62,6 +62,50 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
   cloning. `default` (or any unknown name) uses the model's default voice.
 - `response_format`: `wav`, `mp3`, `flac`, `pcm` (24kHz mono s16le).
 - `speed` ≠ 1.0 is rejected with 400 — not supported by the backend.
+- `language` (extension, optional) names the generation language on
+  `/v1/audio/speech` and `/v1/audio/clone` — see below.
+
+### Language
+
+`/v1/audio/speech` and `/v1/audio/clone` accept an optional `language` field
+that is passed straight through to the model
+(`processor.build_user_message(..., language=...)`). Omit it and the model
+infers the language from the text, exactly as before this field existed.
+
+```bash
+curl -X POST http://localhost:8766/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input": "むかしむかし、ある所に。", "language": "Japanese"}' \
+  -o jp.wav
+
+curl -X POST http://localhost:8766/v1/audio/clone \
+  -F input="むかしむかし、ある所に。" -F language=Japanese -F file=@ref.wav -o jp.wav
+```
+
+Values are plain language names, taken verbatim from upstream — no enum is
+enforced server-side, so anything MOSS accepts works. MOSS-TTS-v1.5 supports
+31 languages: Chinese, English, Japanese, Korean, French, German, Spanish,
+Portuguese, Italian, Russian, Arabic, Hindi, Indonesian, Vietnamese, Thai,
+Turkish, Dutch, Polish, Swedish, Danish, Norwegian, Finnish, Czech, Greek,
+Hungarian, Romanian, Ukrainian, Hebrew, Malay, Filipino and Persian. The
+authoritative list lives with the model — see
+[OpenMOSS/MOSS-TTS](https://github.com/OpenMOSS/MOSS-TTS) and the
+[MOSS-TTS-v1.5 model card](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-v1.5).
+
+Set `DEFAULT_LANGUAGE` (or `MOSS_DEFAULT_LANGUAGE`) to apply a language to
+every request that omits the field. Unset by default, so an unconfigured
+server behaves identically to before.
+
+If the loaded processor revision does not accept the `language` keyword, the
+server logs a warning and synthesizes without it rather than failing the
+request.
+
+**`/v1/audio/voice-design` does not support `language`.** That endpoint runs
+MOSS-VoiceGenerator (1.7B), a different model that supports **Chinese and
+English only** and whose `build_user_message` takes just `text` and
+`instruction`. Sending `language` there is ignored, and the server
+deliberately never forwards it — doing so would raise a `TypeError`. Steer
+that endpoint's delivery through `instruction` instead.
 
 ### curl
 
@@ -161,10 +205,21 @@ transformers 5.x the TTS path needs (verified working).
 More advanced MOSS capabilities (duration control, Pinyin/IPA pronunciation,
 code-switching) can be exposed later as non-OpenAI routes under `/v1/moss/*`.
 
+## Tests
+
+```bash
+uv sync --group dev
+uv run pytest
+```
+
+The suite mocks the processor — no model weights are downloaded and no
+generation runs.
+
 ## Architecture
 
 ```
 app/routes.py   — FastAPI controllers, OpenAI shapes, bearer auth, mp3 encode
 app/engine.py   — singleton Engine: lazy load, serialized generate, wav encode
 app/config.py   — pydantic-settings over .env
+tests/          — pytest, processor mocked (no weights needed)
 ```
