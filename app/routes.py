@@ -34,6 +34,7 @@ from .engine import (
     engine,
     resolve_model_id,
     resolve_sound_effect_model_id,
+    rss_bytes,
 )
 
 router = APIRouter()
@@ -468,7 +469,12 @@ POST /v1/models/preload  — {"model": "..."} (empty = default); starts a
 ## Other routes
 
 GET /health — {status, default_model, loaded_model, loading_model,
-               device, dtype}
+               device, dtype, rss_mb, idle_seconds, idle_unload_seconds}
+
+The resident model is dropped after idle_unload_seconds without a generate
+(default 900; set IDLE_UNLOAD_SECONDS=0 to keep it loaded forever). The next
+request reloads it from the local HF cache. loaded_model going null on an
+idle server is that, not a crash.
 
 ## Errors
 
@@ -486,6 +492,8 @@ async def usage_guide() -> str:
 
 @router.get("/health")
 async def health() -> dict:
+    rss = rss_bytes()
+    idle = engine.idle_seconds
     return {
         "status": "ok",
         "default_model": DEFAULT_MODEL,
@@ -493,4 +501,9 @@ async def health() -> dict:
         "loading_model": engine.loading_model,
         "device": engine.device,
         "dtype": str(engine.dtype),
+        # Enough to answer "is it leaking?" from outside the process, which
+        # previously meant reading the source.
+        "rss_mb": round(rss / (1024 * 1024), 1) if rss is not None else None,
+        "idle_seconds": round(idle, 1) if idle is not None else None,
+        "idle_unload_seconds": settings.idle_unload_seconds,
     }

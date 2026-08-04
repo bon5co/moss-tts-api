@@ -21,6 +21,23 @@ class Settings(BaseSettings):
     # resolves to <voices_dir>/<voice>.wav.
     voices_dir: str = "voices"
 
+    # Drop the resident model after this many seconds without a generate.
+    # The 8B flagship is ~16GB of weights, and on MPS that is unified memory
+    # taken from the whole machine, not just this process — a server that
+    # answers one /speak call at 09:00 should not still be holding it at
+    # 17:00. The next request pays a reload (weights come from the local HF
+    # cache, so it is disk-speed, not download-speed).
+    # 0 disables the reaper entirely: the historical behaviour, for hosts
+    # where the model is the only tenant and reload latency matters more
+    # than idle footprint.
+    idle_unload_seconds: int = Field(
+        default=900,
+        ge=0,
+        validation_alias=AliasChoices(
+            "MOSS_IDLE_UNLOAD_SECONDS", "IDLE_UNLOAD_SECONDS", "idle_unload_seconds"
+        ),
+    )
+
     # Optional generation language for the TTS path (/v1/audio/speech and
     # /v1/audio/clone), applied when a request omits `language`. Upstream
     # MOSS-TTS-v1.5 accepts plain language names ("Japanese", "French", ...)

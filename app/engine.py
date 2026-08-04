@@ -8,10 +8,13 @@ interleaving them thrashes memory.
 
 from __future__ import annotations
 
+import gc
 import inspect
 import io
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -161,8 +164,6 @@ def _patch_sfx_float64_for_mps() -> None:
         x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
         return x.to(position.dtype)
 
-    import sys
-
     from moss_soundeffect_v2.diffsynth.models import wan_video_dit
 
     original = wan_video_dit.sinusoidal_embedding_1d
@@ -180,8 +181,37 @@ def _patch_sfx_float64_for_mps() -> None:
     _sfx_mps_patched = True
 
 
+def rss_bytes() -> int | None:
+    """Current resident set size, or None where it can't be determined.
+
+    Deliberately dependency-free: /proc on Linux, `ps` on macOS (where the
+    server actually runs, on MPS). Only ever called from /health.
+    """
+    try:
+        statm = Path("/proc/self/statm")
+        if statm.exists():
+            pages = int(statm.read_text().split()[1])
+            return pages * os.sysconf("SC_PAGE_SIZE")
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return int(out.stdout.strip()) * 1024
+    except Exception:  # a health endpoint must never 500 over a stat read
+        log.debug("could not read RSS", exc_info=True)
+    return None
+
+
 class Engine:
-    """One resident model; requesting a different variant swaps it in."""
+    """One resident model; requesting a different variant swaps it in.
+
+    A model also drops out on its own after settings.idle_unload_seconds
+    without a generate — see _reaper_loop. Weights are big enough (~16GB for
+    the 8B flagship) that holding them through an idle night is the larger
+    cost, and on MPS that memory is taken from the whole machine.
+    """
 
     def __init__(self) -> None:
         self._model = None
@@ -192,6 +222,11 @@ class Engine:
         # One lock for load AND generate: a swap must never run while a
         # generate is in flight (the resident model would be freed mid-use).
         self._lock = threading.RLock()
+        # Monotonic, so a wall-clock jump (NTP step, laptop sleep) can't make
+        # a busy model look idle for hours. None = nothing resident.
+        self._last_used: float | None = None
+        self._reaper: threading.Thread | None = None
+        self._stop_reaper = threading.Event()
         self.device = _resolve_device(settings.device)
         self.dtype = _resolve_dtype(settings.dtype, self.device)
 
@@ -203,6 +238,16 @@ class Engine:
     def loading_model(self) -> str | None:
         return self._loading_id
 
+    @property
+    def idle_seconds(self) -> float | None:
+        """Seconds since the last generate, or None if nothing is resident."""
+        if self._model is None or self._last_used is None:
+            return None
+        return time.monotonic() - self._last_used
+
+    def _touch(self) -> None:
+        self._last_used = time.monotonic()
+
     def _unload_resident(self) -> None:
         if self._model is None:
             return
@@ -211,10 +256,68 @@ class Engine:
         self._processor = None
         self._model_id = None
         self._kind = None
+        self._last_used = None
+        # Order matters. empty_cache() only returns blocks with no live
+        # tensors, and transformers models sit in reference cycles (hooks,
+        # config back-refs) that refcounting alone does not break — so
+        # without this collect the weights are still reachable when the
+        # cache is swept, nothing is freed, and the next model loads on top
+        # of the old one. That is how a 16GB swap becomes a 32GB peak.
+        gc.collect()
         if self.device == "mps":
             torch.mps.empty_cache()
         elif self.device == "cuda":
             torch.cuda.empty_cache()
+
+    # --- idle reaper ---------------------------------------------------------
+
+    def _reaper_tick(self) -> float:
+        """Poll interval: often enough to be punctual, rarely enough to be free."""
+        timeout = settings.idle_unload_seconds
+        return max(1.0, min(30.0, timeout / 4)) if timeout > 0 else 30.0
+
+    def unload_if_idle(self) -> bool:
+        """Drop the resident model if it has gone untouched. Returns whether it did."""
+        timeout = settings.idle_unload_seconds
+        if timeout <= 0:
+            return False
+        idle = self.idle_seconds
+        if idle is None or idle < timeout:
+            return False
+        with self._lock:
+            # Re-check under the lock: waiting for it may have meant waiting
+            # out a long generate, which just reset the clock.
+            idle = self.idle_seconds
+            if idle is None or idle < settings.idle_unload_seconds:
+                return False
+            log.info("unloading %s after %.0fs idle", self._model_id, idle)
+            self._unload_resident()
+            return True
+
+    def _reaper_loop(self) -> None:
+        while not self._stop_reaper.wait(self._reaper_tick()):
+            try:
+                self.unload_if_idle()
+            except Exception:  # a reaper that dies silently is worse than a log line
+                log.exception("idle unload failed; reaper continues")
+
+    def _ensure_reaper(self) -> None:
+        """Start the reaper on first load — never in a process that never loads."""
+        if settings.idle_unload_seconds <= 0:
+            return
+        if self._reaper is not None and self._reaper.is_alive():
+            return
+        self._stop_reaper.clear()
+        self._reaper = threading.Thread(
+            target=self._reaper_loop, name="moss-idle-reaper", daemon=True
+        )
+        self._reaper.start()
+
+    def stop_reaper(self) -> None:
+        self._stop_reaper.set()
+        if self._reaper is not None:
+            self._reaper.join(timeout=5)
+            self._reaper = None
 
     def ensure_loaded(self, model_id: str, kind: str = "tts") -> None:
         """Blocking. Loads model_id, swapping out any other resident model."""
@@ -282,13 +385,22 @@ class Engine:
                     self._model = model
                 self._model_id = model_id
                 self._kind = kind
+                # Start the idle clock at load, not at first use: a model
+                # preloaded and then never called is exactly as idle as one
+                # that was used once.
+                self._touch()
                 log.info("model loaded in %.1fs", time.time() - t0)
+                self._ensure_reaper()
             finally:
                 self._loading_id = None
 
     def preload_async(self, model_id: str, kind: str = "tts") -> bool:
-        """Kick a background load. Returns False if already resident."""
-        if self._model_id == model_id:
+        """Kick a background load. Returns False if already resident or loading."""
+        # _model_id is only set once the load finishes, so checking it alone
+        # let every poll of /v1/models/preload during a 60s load spawn one
+        # more thread to block on the lock and then discover it had nothing
+        # to do.
+        if self._model_id == model_id or self._loading_id == model_id:
             return False
         threading.Thread(
             target=self.ensure_loaded, args=(model_id, kind), daemon=True
@@ -327,6 +439,7 @@ class Engine:
                 torch.mps.empty_cache()
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
+            self._touch()
         if wav.ndim > 1:
             wav = wav.T.squeeze()
         return wav, sr
@@ -374,6 +487,7 @@ class Engine:
                 torch.mps.empty_cache()
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
+            self._touch()
         wav = decoded.audio_codes_list[0].float().cpu().numpy()
         if wav.ndim > 1:
             wav = wav.squeeze()
@@ -424,6 +538,7 @@ class Engine:
                 torch.mps.empty_cache()
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
+            self._touch()
 
         wav = decoded.audio_codes_list[0]
         if isinstance(wav, torch.Tensor):

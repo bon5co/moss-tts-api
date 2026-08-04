@@ -36,7 +36,7 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
 | `PUT`  | `/v1/voices/{name}` | Extension: register/replace a named voice (multipart clip; `?overwrite=false` to refuse replacing) |
 | `POST` | `/v1/audio/sound-effect` | Extension: text-to-sound-effect (48kHz) |
-| `GET`  | `/health` | Liveness, device, resident model |
+| `GET`  | `/health` | Liveness, device, resident model, RSS + idle clock |
 
 ### OpenAI compatibility notes
 
@@ -95,6 +95,31 @@ authoritative list lives with the model — see
 Set `DEFAULT_LANGUAGE` (or `MOSS_DEFAULT_LANGUAGE`) to apply a language to
 every request that omits the field. Unset by default, so an unconfigured
 server behaves identically to before.
+
+## Idle unloading
+
+One model is resident at a time, and it is dropped after
+`IDLE_UNLOAD_SECONDS` (default `900`) without a generate. The 8B flagship is
+~16GB of weights; on MPS that is unified memory taken from the whole
+machine, so a server that answers one call in the morning should not still
+be holding it that evening. The next request reloads from the local HF
+cache — disk-speed, not download-speed.
+
+```
+IDLE_UNLOAD_SECONDS=900   # default; 0 keeps the model loaded forever
+```
+
+Set `0` where the model is the only tenant of the box and reload latency
+matters more than idle footprint. `/health` reports the state:
+
+```json
+{"loaded_model": "OpenMOSS-Team/MOSS-TTS-v1.5", "rss_mb": 16412.5,
+ "idle_seconds": 42.1, "idle_unload_seconds": 900}
+```
+
+`loaded_model: null` on an idle server is the reaper having done its job,
+not a crash. `rss_mb` is there so "is it leaking?" can be answered by
+polling the endpoint instead of reading the source.
 
 If the loaded processor revision does not accept the `language` keyword, the
 server logs a warning and synthesizes without it rather than failing the
@@ -193,6 +218,7 @@ On CPU plans use the smallest model. Recommended service variables:
 MODEL_ID=OpenMOSS-Team/MOSS-TTS-Local-Transformer   # 1.7B — fits 8GB RAM
 DTYPE=bfloat16                                      # ~3.4GB resident vs ~7GB float32
 MAX_NEW_TOKENS=512                                  # ~40s audio cap; CPU is slow
+IDLE_UNLOAD_SECONDS=900                             # free the weights when idle
 API_KEY=<generate one>
 ```
 
