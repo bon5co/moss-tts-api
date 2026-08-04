@@ -113,13 +113,24 @@ Set `0` where the model is the only tenant of the box and reload latency
 matters more than idle footprint. `/health` reports the state:
 
 ```json
-{"loaded_model": "OpenMOSS-Team/MOSS-TTS-v1.5", "rss_mb": 16412.5,
+{"loaded_model": "OpenMOSS-Team/MOSS-TTS-v1.5", "rss_mb": 690.2,
+ "device_allocated_mb": 16412.5, "device_reserved_mb": 17010.0,
  "idle_seconds": 42.1, "idle_unload_seconds": 900}
 ```
 
 `loaded_model: null` on an idle server is the reaper having done its job,
-not a crash. `rss_mb` is there so "is it leaking?" can be answered by
-polling the endpoint instead of reading the source.
+not a crash.
+
+**On mps/cuda the weights are in `device_allocated_mb`, not `rss_mb`.** RSS
+counts neither Metal buffers nor CUDA allocator arenas — measured on a live
+MPS server, unloading ~16GB of MOSS-TTS-v1.5 weights moved `rss_mb` by
+11.8MB. Watch the device figure there and `rss_mb` on CPU hosts, where both
+device fields are `null`.
+
+`device_reserved_mb` is what the allocator has taken from the driver and not
+returned; the gap above `device_allocated_mb` is cache, which is what
+`empty_cache()` releases. Steadily rising *allocated* across an
+idle→load→idle cycle is a leak. A high *reserved* with low allocated is not.
 
 If the loaded processor revision does not accept the `language` keyword, the
 server logs a warning and synthesizes without it rather than failing the

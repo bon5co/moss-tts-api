@@ -33,6 +33,7 @@ from .engine import (
     encode_wav,
     engine,
     resolve_model_id,
+    device_memory,
     resolve_sound_effect_model_id,
     rss_bytes,
 )
@@ -469,7 +470,12 @@ POST /v1/models/preload  — {"model": "..."} (empty = default); starts a
 ## Other routes
 
 GET /health — {status, default_model, loaded_model, loading_model,
-               device, dtype, rss_mb, idle_seconds, idle_unload_seconds}
+               device, dtype, rss_mb, device_allocated_mb,
+               device_reserved_mb, idle_seconds, idle_unload_seconds}
+
+On mps/cuda the model weights are in device_allocated_mb, not rss_mb —
+RSS does not count Metal buffers or CUDA allocator arenas. Both are null
+on cpu, where rss_mb is the whole story.
 
 The resident model is dropped after idle_unload_seconds without a generate
 (default 900; set IDLE_UNLOAD_SECONDS=0 to keep it loaded forever). The next
@@ -490,10 +496,14 @@ async def usage_guide() -> str:
     return USAGE_GUIDE
 
 
+def _mb(value: int | None) -> float | None:
+    return round(value / (1024 * 1024), 1) if value is not None else None
+
+
 @router.get("/health")
 async def health() -> dict:
-    rss = rss_bytes()
     idle = engine.idle_seconds
+    allocated, reserved = device_memory(engine.device)
     return {
         "status": "ok",
         "default_model": DEFAULT_MODEL,
@@ -502,8 +512,11 @@ async def health() -> dict:
         "device": engine.device,
         "dtype": str(engine.dtype),
         # Enough to answer "is it leaking?" from outside the process, which
-        # previously meant reading the source.
-        "rss_mb": round(rss / (1024 * 1024), 1) if rss is not None else None,
+        # previously meant reading the source. On an accelerator the model
+        # weights are in device_allocated_mb, NOT rss_mb — see device_memory.
+        "rss_mb": _mb(rss_bytes()),
+        "device_allocated_mb": _mb(allocated),
+        "device_reserved_mb": _mb(reserved),
         "idle_seconds": round(idle, 1) if idle is not None else None,
         "idle_unload_seconds": settings.idle_unload_seconds,
     }
