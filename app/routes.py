@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 import soundfile as sf
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
@@ -283,22 +283,40 @@ MAX_VOICE_SECONDS = 60.0
 async def put_voice(
     name: str,
     file: UploadFile = File(description="reference clip (wav/mp3/flac), ideally 5-15s"),
+    overwrite: bool = Query(
+        True, description="false = 409 instead of replacing an existing voice"
+    ),
 ) -> dict:
     """Not an OpenAI route — register or replace a named reference clip.
 
     The clip is transcoded to wav and stored at <voices_dir>/<name>.wav, so
     it survives restarts when voices_dir sits on a persistent volume and is
     immediately usable as `"voice": "<name>"` in /v1/audio/speech.
+
+    Replacing is destructive and unversioned — the previous clip is gone. The
+    response says which happened (`"replaced": true`), and `?overwrite=false`
+    turns an accidental clobber into a 409 instead. Uploads that fail
+    validation never touch an existing clip: the new audio is decoded and
+    checked in a temp file first, and only a fully valid one is moved into
+    place.
     """
     if not VOICE_NAME_RE.fullmatch(name):
         raise HTTPException(400, "voice name must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}")
     if name == "default":
         raise HTTPException(400, "'default' is reserved for the model's built-in voice")
+
+    voices_dir = Path(settings.voices_dir)
+    target = voices_dir / f"{name}.wav"
+    if target.exists() and not overwrite:
+        raise HTTPException(
+            409,
+            f"voice '{name}' already exists; retry with ?overwrite=true to replace it",
+        )
+
     raw = await file.read()
     if len(raw) > MAX_VOICE_UPLOAD_BYTES:
         raise HTTPException(413, "reference clip too large (max 20MB)")
 
-    voices_dir = Path(settings.voices_dir)
     voices_dir.mkdir(parents=True, exist_ok=True)
     # Transcode to wav in a temp file, then atomically replace the target so
     # a concurrent synthesis never reads a half-written clip.
@@ -324,10 +342,13 @@ async def put_voice(
                 f"reference clip is {seconds:.1f}s; must be "
                 f"{MIN_VOICE_SECONDS:g}-{MAX_VOICE_SECONDS:g}s (5-15s works best)",
             )
-        os.replace(tmp_path, voices_dir / f"{name}.wav")
+        # Checked as late as possible so the flag describes what os.replace
+        # actually did, not what the directory looked like on arrival.
+        replaced = target.exists()
+        os.replace(tmp_path, target)
     finally:
         tmp_path.unlink(missing_ok=True)
-    return {"voice": name, "seconds": round(seconds, 2)}
+    return {"voice": name, "seconds": round(seconds, 2), "replaced": replaced}
 
 
 USAGE_GUIDE = """\
@@ -374,6 +395,11 @@ Two ways:
     curl -s -X PUT http://localhost:8766/v1/voices/alice \\
       -F file=@ref.wav
 
+   Uploading an existing name replaces that clip — the old one is gone,
+   there is no history. The response reports which happened
+   ("replaced": true), and ?overwrite=false returns 409 instead of
+   clobbering. A rejected upload (bad audio, wrong length) never touches
+   the existing clip.
    (Or drop a WAV into the server's voices/ directory by hand.)
 2. One-shot: POST /v1/audio/clone (multipart/form-data) with fields
    `input` (text), `file` (reference clip), optional `response_format`,

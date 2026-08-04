@@ -34,7 +34,7 @@ synthesis runs ~7 tokens/s ≈ 7s wall per 1s of audio.
 | `GET`  | `/v1/models` | Registry with `default`/`loaded`/`loading` flags |
 | `POST` | `/v1/models/preload` | Order a model into memory ahead of first use |
 | `GET`  | `/v1/voices` | Extension: reference clips available for cloning |
-| `PUT`  | `/v1/voices/{name}` | Extension: register/replace a named voice (multipart clip) |
+| `PUT`  | `/v1/voices/{name}` | Extension: register/replace a named voice (multipart clip; `?overwrite=false` to refuse replacing) |
 | `POST` | `/v1/audio/sound-effect` | Extension: text-to-sound-effect (48kHz) |
 | `GET`  | `/health` | Liveness, device, resident model |
 
@@ -139,6 +139,26 @@ Accepts wav/mp3/flac (transcoded to wav server-side, 1–60s enforced). Stored
 at `voices/<name>.wav` — dropping a file there by hand works too. List
 available names via `GET /v1/voices`. For a one-shot clone without storing
 anything, use `POST /v1/audio/clone` (multipart clip + text).
+
+Uploading a name that already exists **replaces** that clip. There is no
+versioning or backup — the previous audio is gone. The response says which
+happened:
+
+```json
+{"voice": "alice", "seconds": 8.2, "replaced": true}
+```
+
+Pass `?overwrite=false` to get `409` instead of replacing:
+
+```bash
+curl -X PUT "http://localhost:8766/v1/voices/alice?overwrite=false" -F file=@ref.wav
+```
+
+An upload that fails validation (undecodable audio, out-of-range duration)
+never touches the existing clip — the new clip is decoded and checked in a
+temp file, and only a valid one is moved into place, atomically. Concurrent
+synthesis therefore reads either the old clip or the new one, never a
+half-written file.
 
 ## Voice design
 
