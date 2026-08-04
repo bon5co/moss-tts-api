@@ -20,7 +20,14 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.28",
 ]
+
+[tool.pytest.ini_options]
+# The app lives at ./app with no src layout and is not installed into the
+# venv, so the repo root has to be importable for `pytest` to work bare.
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.uv]
 # moss-soundeffect-v2 pins transformers==4.57.1; the TTS models need >=5.
