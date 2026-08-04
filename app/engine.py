@@ -204,6 +204,33 @@ def rss_bytes() -> int | None:
     return None
 
 
+def device_memory(device: str) -> tuple[int | None, int | None]:
+    """(allocated, reserved) bytes on the accelerator, or (None, None).
+
+    RSS does not see this. Model weights on MPS live in MTLBuffers owned by
+    the Metal driver, and CUDA weights live in the caching allocator's
+    arenas — neither is counted by `ps rss` or /proc/self/statm. Measured on
+    the live server: unloading ~16GB of MOSS-TTS-v1.5 weights moved RSS by
+    11.8MB. Without these numbers the health endpoint cannot answer the one
+    question it exists to answer on a GPU host.
+
+    `allocated` is what tensors currently hold; `reserved` is what the
+    allocator has taken from the driver and not given back — the gap between
+    them is cache, which is what empty_cache() releases.
+    """
+    try:
+        if device == "mps" and hasattr(torch, "mps"):
+            return (
+                torch.mps.current_allocated_memory(),
+                torch.mps.driver_allocated_memory(),
+            )
+        if device == "cuda" and torch.cuda.is_available():
+            return torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    except Exception:
+        log.debug("could not read %s memory", device, exc_info=True)
+    return None, None
+
+
 class Engine:
     """One resident model; requesting a different variant swaps it in.
 
@@ -252,6 +279,7 @@ class Engine:
         if self._model is None:
             return
         log.info("unloading %s", self._model_id)
+        before, _ = device_memory(self.device)
         self._model = None
         self._processor = None
         self._model_id = None
@@ -268,6 +296,13 @@ class Engine:
             torch.mps.empty_cache()
         elif self.device == "cuda":
             torch.cuda.empty_cache()
+        after, _ = device_memory(self.device)
+        if before is not None and after is not None:
+            log.info(
+                "device memory %.1fGB -> %.1fGB",
+                before / 1e9,
+                after / 1e9,
+            )
 
     # --- idle reaper ---------------------------------------------------------
 

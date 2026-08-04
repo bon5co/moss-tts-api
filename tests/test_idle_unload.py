@@ -7,6 +7,7 @@ and what it does before sweeping the allocator cache.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -278,6 +279,54 @@ def test_rss_bytes_never_raises(monkeypatch):
     assert engine_mod.rss_bytes() is None
 
 
+# --- device memory reporting -------------------------------------------------
+
+
+def test_device_memory_is_none_on_cpu():
+    """There is no accelerator allocator to ask; rss_mb is the whole story."""
+    assert engine_mod.device_memory("cpu") == (None, None)
+
+
+def test_device_memory_reads_the_cuda_allocator(monkeypatch):
+    monkeypatch.setattr(engine_mod.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(engine_mod.torch.cuda, "memory_allocated", lambda: 16_000_000_000)
+    monkeypatch.setattr(engine_mod.torch.cuda, "memory_reserved", lambda: 17_000_000_000)
+    assert engine_mod.device_memory("cuda") == (16_000_000_000, 17_000_000_000)
+
+
+def test_device_memory_reads_the_mps_allocator(monkeypatch):
+    class FakeMPS:
+        current_allocated_memory = staticmethod(lambda: 16_000_000_000)
+        driver_allocated_memory = staticmethod(lambda: 17_000_000_000)
+
+    monkeypatch.setattr(engine_mod.torch, "mps", FakeMPS)
+    assert engine_mod.device_memory("mps") == (16_000_000_000, 17_000_000_000)
+
+
+def test_device_memory_never_raises(monkeypatch):
+    """A torch build without the accelerator must not 500 /health."""
+
+    class ExplodingMPS:
+        @staticmethod
+        def current_allocated_memory():
+            raise RuntimeError("MPS not available")
+
+    monkeypatch.setattr(engine_mod.torch, "mps", ExplodingMPS)
+    assert engine_mod.device_memory("mps") == (None, None)
+
+
+def test_unload_logs_device_memory_freed(monkeypatch, eng, caplog):
+    """The unload has to be visible in the logs, not only via /health —
+    on the live server RSS moved 11.8MB while ~16GB of weights were freed."""
+    eng.device = "cuda"
+    readings = iter([(16_000_000_000, 17_000_000_000), (200_000_000, 300_000_000)])
+    monkeypatch.setattr(engine_mod, "device_memory", lambda device: next(readings))
+    monkeypatch.setattr(engine_mod.torch.cuda, "empty_cache", lambda: None)
+    with caplog.at_level(logging.INFO, logger="moss-tts.engine"):
+        eng._unload_resident()
+    assert "device memory 16.0GB -> 0.2GB" in caplog.text
+
+
 # --- the health endpoint -----------------------------------------------------
 
 
@@ -299,6 +348,19 @@ def test_health_exposes_the_memory_fields():
     assert body["idle_unload_seconds"] == settings.idle_unload_seconds
     # Nothing resident in a test process, so there is no idle clock running.
     assert body["idle_seconds"] is None
+    assert "device_allocated_mb" in body
+    assert "device_reserved_mb" in body
+
+
+def test_health_reports_device_memory_in_mb(monkeypatch):
+    from app import routes as routes_mod
+
+    monkeypatch.setattr(
+        routes_mod, "device_memory", lambda device: (16 * 1024**3, 17 * 1024**3)
+    )
+    body = _health_client().get("/health").json()
+    assert body["device_allocated_mb"] == 16384.0
+    assert body["device_reserved_mb"] == 17408.0
 
 
 def test_health_survives_an_unreadable_rss(monkeypatch):
