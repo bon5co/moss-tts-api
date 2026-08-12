@@ -96,6 +96,27 @@ Set `DEFAULT_LANGUAGE` (or `MOSS_DEFAULT_LANGUAGE`) to apply a language to
 every request that omits the field. Unset by default, so an unconfigured
 server behaves identically to before.
 
+## Shutdown, and reading the logs after one
+
+Every run brackets itself: `moss-tts-api up: pid=… listening on …` at startup,
+`received <SIGNAL>, stopping` / `shutting down (pid=…)` / `shutdown complete`
+at the end. Both ends carry the pid, because an idle server logs nothing in
+between — without the bracket, a shutdown line appears to follow whatever
+happened last (usually a model load), and a run that lasted eight hours reads
+like a crash on startup.
+
+`SIGHUP` is handled explicitly and re-raised as `SIGTERM` so uvicorn's graceful
+path runs. This matters when the server is started from a terminal on a laptop:
+closing that terminal, or dropping the ssh session that owns it, sends HUP,
+and Python's default handling kills the process without running any shutdown
+hook.
+
+If the log ends with a leaked-semaphore warning naming `/loky-…`, that is
+joblib's worker pool, reached indirectly through `librosa` and the model's
+remote code. It never indicated a fault — the semaphore is reclaimed either
+way — but it looked like one. Shutdown now closes the pool, so a run that ends
+without `shutdown complete` really did die unexpectedly.
+
 ## Idle unloading
 
 One model is resident at a time, and it is dropped after
