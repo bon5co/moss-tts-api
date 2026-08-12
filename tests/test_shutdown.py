@@ -1,15 +1,17 @@
 """Tests for the process shutdown path.
 
-The bug these cover is a log-legibility one, not a crash: a process that exits
-without closing joblib's loky pool prints a leaked-semaphore warning that looks
-like a fault. Nothing here starts a real pool — what is under test is that the
-shutdown path calls the right things, in the right order, and survives every
-one of them failing.
+The bug these cover is a log-legibility one, not a crash: a worker pool that
+is force-killed instead of exiting on its own leaks a semaphore that
+multiprocessing's resource_tracker reclaims with a warning that reads like a
+fault. Nothing here starts a real pool — what is under test is that the
+shutdown path tries a clean exit first, only kills when that hangs, and
+survives every one of these steps failing.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import types
 
 import pytest
@@ -28,18 +30,9 @@ class FakeEngine:
         self.stopped = True
 
 
-@pytest.fixture
-def fake_joblib(monkeypatch):
-    """Install a fake joblib.externals.loky exposing a recording executor."""
-    calls = {}
-
-    class FakeExecutor:
-        def shutdown(self, wait, kill_workers):
-            calls["wait"] = wait
-            calls["kill_workers"] = kill_workers
-
+def _install_executor(monkeypatch, executor):
     loky = types.ModuleType("joblib.externals.loky")
-    loky.get_reusable_executor = lambda: FakeExecutor()
+    loky.get_reusable_executor = lambda: executor
     externals = types.ModuleType("joblib.externals")
     externals.loky = loky
     joblib = types.ModuleType("joblib")
@@ -48,17 +41,53 @@ def fake_joblib(monkeypatch):
     monkeypatch.setitem(sys.modules, "joblib", joblib)
     monkeypatch.setitem(sys.modules, "joblib.externals", externals)
     monkeypatch.setitem(sys.modules, "joblib.externals.loky", loky)
+
+
+@pytest.fixture
+def fake_joblib(monkeypatch):
+    """Install a fake loky executor that exits on its own instantly."""
+    calls = []
+
+    class FakeExecutor:
+        def shutdown(self, wait, kill_workers):
+            calls.append({"wait": wait, "kill_workers": kill_workers})
+
+    _install_executor(monkeypatch, FakeExecutor())
+    return calls
+
+
+@pytest.fixture
+def wedged_joblib(monkeypatch):
+    """A loky executor whose graceful shutdown never returns on its own."""
+    calls = []
+
+    class WedgedExecutor:
+        def shutdown(self, wait, kill_workers):
+            calls.append({"wait": wait, "kill_workers": kill_workers})
+            if not kill_workers:
+                threading.Event().wait()  # never set: simulates a hang
+
+    _install_executor(monkeypatch, WedgedExecutor())
+    monkeypatch.setattr(shutdown_mod, "GRACE_SECONDS", 0.05)
     return calls
 
 
 # --- the pool ----------------------------------------------------------------
 
 
-def test_pool_is_shut_down_and_workers_killed(fake_joblib):
+def test_pool_exits_gracefully_when_it_can(fake_joblib):
     assert shutdown_mod.shutdown_worker_pool() is True
-    # Waiting matters: returning before the workers are gone is what leaves
-    # the semaphore for the resource_tracker to complain about.
-    assert fake_joblib == {"wait": True, "kill_workers": True}
+    # A worker that exits on its own unregisters its own semaphore -- no
+    # force-kill needed, and no resource_tracker warning.
+    assert fake_joblib == [{"wait": True, "kill_workers": False}]
+
+
+def test_wedged_pool_falls_back_to_kill(wedged_joblib):
+    assert shutdown_mod.shutdown_worker_pool() is True
+    assert wedged_joblib == [
+        {"wait": True, "kill_workers": False},
+        {"wait": True, "kill_workers": True},
+    ]
 
 
 def test_absent_joblib_is_not_an_error(monkeypatch):
@@ -85,11 +114,11 @@ def test_shutdown_stops_reaper_then_pool(fake_joblib):
     eng = FakeEngine()
     shutdown_mod.shutdown(eng)
     assert eng.stopped
-    assert fake_joblib["kill_workers"] is True
+    assert fake_joblib == [{"wait": True, "kill_workers": False}]
 
 
 def test_pool_still_closed_when_reaper_raises(fake_joblib):
     """A wedged reaper must not cost us the pool cleanup that follows it."""
     eng = FakeEngine(boom=True)
     shutdown_mod.shutdown(eng)
-    assert fake_joblib["kill_workers"] is True
+    assert fake_joblib == [{"wait": True, "kill_workers": False}]
