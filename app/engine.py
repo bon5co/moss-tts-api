@@ -13,6 +13,7 @@ import inspect
 import io
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -204,6 +205,28 @@ def rss_bytes() -> int | None:
     return None
 
 
+# Below this, a model load is refused outright rather than attempted. A
+# multi-GB weight load needs headroom for two reasons: the download/cache
+# write itself, and the OS's ability to grow swap under the memory pressure
+# the load creates. On macOS, a full disk means the second one fails
+# silently at the kernel level ("low swap: failed to create swapfile")
+# followed by a SIGKILL with no application-level error at all -- this
+# check trades that mystery process death for a 503 the caller can act on.
+MIN_FREE_DISK_BYTES = 4 * 1024**3
+
+
+def _check_disk_headroom() -> None:
+    try:
+        free = shutil.disk_usage(Path.home()).free
+    except Exception:
+        return  # best-effort; a stat failure must never block a load
+    if free < MIN_FREE_DISK_BYTES:
+        raise RuntimeError(
+            f"only {free / 1e9:.1f}GB free on disk; refusing to load a model "
+            f"(need at least {MIN_FREE_DISK_BYTES / 1e9:.0f}GB free)"
+        )
+
+
 def device_memory(device: str) -> tuple[int | None, int | None]:
     """(allocated, reserved) bytes on the accelerator, or (None, None).
 
@@ -361,6 +384,7 @@ class Engine:
         with self._lock:
             if self._model_id == model_id:
                 return
+            _check_disk_headroom()
             self._loading_id = model_id
             try:
                 self._unload_resident()

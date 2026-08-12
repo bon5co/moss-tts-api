@@ -216,6 +216,60 @@ def test_tick_stays_within_bounds(monkeypatch, eng):
         assert eng._reaper_tick() == expected
 
 
+# --- disk headroom guard ------------------------------------------------------
+
+
+class _FakeUsage:
+    def __init__(self, free):
+        self.free = free
+
+
+def test_check_disk_headroom_rejects_a_full_disk(monkeypatch):
+    monkeypatch.setattr(
+        engine_mod.shutil, "disk_usage", lambda path: _FakeUsage(1 * 1024**3)
+    )
+    with pytest.raises(RuntimeError, match="free on disk"):
+        engine_mod._check_disk_headroom()
+
+
+def test_check_disk_headroom_passes_with_room(monkeypatch):
+    monkeypatch.setattr(
+        engine_mod.shutil, "disk_usage", lambda path: _FakeUsage(50 * 1024**3)
+    )
+    engine_mod._check_disk_headroom()  # must not raise
+
+
+def test_check_disk_headroom_is_best_effort(monkeypatch):
+    """A stat failure must not block a load that might otherwise succeed."""
+
+    def explode(path):
+        raise OSError("statfs failed")
+
+    monkeypatch.setattr(engine_mod.shutil, "disk_usage", explode)
+    engine_mod._check_disk_headroom()  # must not raise
+
+
+def test_ensure_loaded_refuses_a_full_disk(monkeypatch, eng):
+    monkeypatch.setattr(
+        engine_mod, "_check_disk_headroom",
+        lambda: (_ for _ in ()).throw(RuntimeError("only 1.0GB free on disk")),
+    )
+    with pytest.raises(RuntimeError, match="free on disk"):
+        eng.ensure_loaded("fake/other")
+    # Refused before anything was touched: the resident model is untouched.
+    assert eng._model_id == "fake/model"
+
+
+def test_a_load_already_resident_skips_the_disk_check(monkeypatch, eng):
+    """No new load, no reason to care how full the disk is."""
+
+    def explode():
+        raise AssertionError("disk headroom should not be checked")
+
+    monkeypatch.setattr(engine_mod, "_check_disk_headroom", explode)
+    eng.ensure_loaded("fake/model")  # already resident, no-op
+
+
 # --- preload deduplication ---------------------------------------------------
 
 
