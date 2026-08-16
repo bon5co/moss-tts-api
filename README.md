@@ -293,6 +293,47 @@ uv run pytest
 The suite mocks the processor — no model weights are downloaded and no
 generation runs.
 
+### End-to-end, against a real server
+
+`scripts/e2e.py` is the other half, and the half that catches host problems: it
+drives a running server over HTTP until it loads real weights and speaks real
+audio, then times it. It is a standalone [PEP 723](https://peps.python.org/pep-0723/)
+script, so it needs no checkout, no virtualenv and no `uv sync` — its dependency
+list lives in the file:
+
+```bash
+uv run scripts/e2e.py --base http://127.0.0.1:8766
+uv run https://raw.githubusercontent.com/bon5co/moss-tts-api/main/scripts/e2e.py \
+  --base http://my-host:8766
+```
+
+`--ref clip.wav` adds a voice-clone stage (a separate code path from
+`/v1/audio/speech`, and one that fails separately), `--sfx` adds the
+sound-effect model (slow, and it evicts the TTS model, so it runs last),
+`--out spoken.wav` keeps the audio for a listen, and `--api-key` covers servers
+that set one. Exit status is 0 only if every stage that ran passed.
+
+Why it exists, concretely: a server was found answering `/health`, `/v1/models`
+and `/v1/voices` perfectly while **every** model load threw two seconds in. The
+mocked suite passed, and could not have failed. This script reports that case as
+
+```
+[ FAIL ] model load — aborted after 9s — loading started then stopped with
+         nothing resident (device_allocated=4.2MB). ... Waiting longer will not help.
+```
+
+which is the difference between "the load is slow" and "the load is broken" —
+the distinction that decides whether a longer timeout is worth trying at all. It
+loads via `/v1/models/preload` rather than a plain generate precisely so it can
+watch `loading_model` go up and come back down; a generate would only return an
+opaque 500.
+
+On a healthy host the last line is a benchmark rather than a verdict: seconds to
+load, and **wall-clock cost per second of generated audio**, which is the number
+to size client timeouts from. Expect roughly an order of magnitude between a CPU
+host and Apple silicon, and several-fold variance on a shared machine depending
+on what else it is doing.
+
 ## Architecture
 
 ```
