@@ -1,0 +1,27 @@
+[project]
+name = "moss-temporal"
+version = "0.1.0"
+description = "Speech synthesis on the MOSS-TTS server as a Temporal workflow, with audio stored in S3-compatible object storage"
+requires-python = ">=3.11"
+
+# This is a *client* of the TTS server, not the server. It speaks HTTP and S3
+# and nothing else, so it does not inherit the parent project's torch stack.
+# That is also why it is its own uv project rather than an extra on the root
+# pyproject.toml: `uv sync` at the repo root pulls ~3 GB of CUDA wheels, which
+# is the wrong price for an agent that only wants to submit a job.
+dependencies = [
+    "temporalio>=1.30.0",
+    "boto3>=1.35",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+moss = "moss_temporal.cli:main"
+moss-worker = "moss_temporal.worker:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["moss_temporal"]
