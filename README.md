@@ -341,4 +341,25 @@ app/routes.py   — FastAPI controllers, OpenAI shapes, bearer auth, mp3 encode
 app/engine.py   — singleton Engine: lazy load, serialized generate, wav encode
 app/config.py   — pydantic-settings over .env
 tests/          — pytest, processor mocked (no weights needed)
+temporal/       — optional Temporal worker + CLI, a *client* of this server
 ```
+
+## Queued mode (Temporal)
+
+`temporal/` adds a second way to reach this server: submit a script as a
+durable Temporal workflow instead of blocking on HTTP, and get back URLs to
+audio in object storage.
+
+It is an addition and changes nothing here — the HTTP API above is untouched,
+and the worker is an ordinary client of `POST /v1/audio/speech`. It exists
+because generation time is long and wildly variable (measured: 14.9s to 78s for
+the same 33-character line, plus ~127s if the model has to load), which makes a
+synchronous call a poor fit for a 31-clip batch. It is its own uv project, so
+nothing there pulls the torch stack onto a machine that only submits jobs.
+
+```bash
+cd temporal && uv sync
+uv run moss submit --file script.txt --voice handler --wait
+```
+
+See [temporal/README.md](temporal/README.md) for the design and the tradeoffs.
