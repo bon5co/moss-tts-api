@@ -29,6 +29,24 @@ def synthesize_clip(job: ClipJob) -> ClipOut:
     heartbeat carries elapsed time: the only signal that separates "slow, as
     usual" from "wedged", given a measured 5x spread on identical input.
     """
+    info = activity.info()
+    # Identifies the run, not just the workflow id: an id whose previous run
+    # has closed can be reused, and Temporal's default policy starts a fresh
+    # run under it. Those two runs must not share an object.
+    owner = f"{info.workflow_id}:{info.workflow_run_id}"
+
+    # Before generating, not after. The key check costs one HEAD; discovering
+    # the collision after synthesis costs the 15-80s the clip took, thrown away.
+    existing = storage.owner_of(job.key)
+    if existing is not None and existing != owner:
+        raise ApplicationError(
+            f"{job.key} already exists, written by {existing or 'an untagged writer'}. "
+            f"Submit with a fresh "
+            f"--id, or a --prefix that separates the two.",
+            type="KeyCollision",
+            non_retryable=True,
+        )
+
     started = time.perf_counter()
     result: dict[str, object] = {}
 
@@ -85,7 +103,11 @@ def synthesize_clip(job: ClipJob) -> ClipOut:
         Progress(job.index, job.num_clips, len(job.text), "uploading", generate_seconds)
     )
     content_type = tts.content_type(job.response_format)
-    url = storage.put(job.key, audio, content_type)
+    try:
+        url = storage.put(job.key, audio, content_type, owner=owner)
+    except storage.KeyCollision as exc:
+        # Lost the race with another run between the check above and here.
+        raise ApplicationError(str(exc), type="KeyCollision", non_retryable=True) from exc
     audio_seconds = tts.duration_seconds(audio, job.response_format)
 
     log.info(

@@ -60,7 +60,10 @@ def synthesize_clip(job: ClipJob) -> ClipOut:
     data = silent_wav(max(0.2, len(job.text) * SECONDS_PER_CHAR))
     activity.heartbeat(Progress(job.index, job.num_clips, len(job.text), "uploading", wall))
     content_type = tts.content_type(job.response_format)
-    url = storage.put(job.key, data, content_type)
+    info = activity.info()
+    url = storage.put(
+        job.key, data, content_type, owner=f"{info.workflow_id}:{info.workflow_run_id}"
+    )
     return ClipOut(
         index=job.index,
         key=job.key,

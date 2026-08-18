@@ -70,14 +70,76 @@ def ensure_bucket() -> None:
     c.create_bucket(Bucket=settings.s3_bucket)
 
 
-def put(key: str, data: bytes, content_type: str) -> str:
-    """Upload and return the URL a consumer should fetch."""
-    client().put_object(
-        Bucket=settings.s3_bucket,
-        Key=key,
-        Body=data,
-        ContentType=content_type,
-    )
+OWNER_KEY = "moss-owner"
+
+
+class KeyCollision(RuntimeError):
+    """The key is already taken by a different run. Not something a retry fixes."""
+
+
+def owner_of(key: str) -> str | None:
+    """The run that wrote `key`; `""` if something is there untagged; None if
+    nothing is.
+
+    The empty string matters. Collapsing "no object" and "an object nobody
+    tagged" into None would wave through exactly the objects written before
+    this guard existed, or by anything else sharing the bucket -- the case the
+    guard is for.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        head = client().head_object(Bucket=settings.s3_bucket, Key=key)
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 404:
+            return None
+        raise
+    # boto3 lowercases user metadata keys on the way out.
+    return head.get("Metadata", {}).get(OWNER_KEY, "")
+
+
+def put(key: str, data: bytes, content_type: str, owner: str) -> str:
+    """Upload and return the URL a consumer should fetch.
+
+    Conditional, not last-writer-wins. Object keys are derived from the
+    workflow id, and a workflow id can come back: Temporal's default reuse
+    policy starts a *new* run under an id whose previous run has closed. A bare
+    put_object would then silently overwrite the first run's audio while its
+    history still advertised those URLs, and nothing would error.
+
+    `IfNoneMatch="*"` makes the write fail instead (MinIO has supported it
+    since RELEASE.2024-10-29). On 412 the owner metadata decides which case it
+    is: our own earlier attempt, which is an idempotent success, or somebody
+    else's object, which is a collision this run must not paper over.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        client().put_object(
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+            Metadata={OWNER_KEY: owner},
+            IfNoneMatch="*",
+        )
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status not in (409, 412):
+            raise
+        # An activity retry after a crash between upload and return finds its
+        # own object here. Refusing that would turn every transient failure
+        # into a permanent one, under exactly the conditions no hand-written
+        # test covers.
+        existing = owner_of(key)
+        if existing == owner:
+            return url_for(key)
+        raise KeyCollision(
+            f"{key} already exists in bucket {settings.s3_bucket}, written by "
+            f"{existing or 'an untagged writer'} rather than {owner}. Submit with a "
+            f"fresh --id, or a --prefix that separates the two."
+        ) from exc
     return url_for(key)
 
 

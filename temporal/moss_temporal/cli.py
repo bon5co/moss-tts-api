@@ -37,6 +37,32 @@ def _encode(obj):
     return str(obj)
 
 
+def _failure_text(exc: BaseException) -> str:
+    """The deepest message in the cause chain.
+
+    A workflow failure wraps an ActivityError wraps the ApplicationError the
+    activity actually raised. Printing only the outer layer gives the caller
+    "Activity task failed", which is the one thing they already knew -- and
+    hides the message the non-retryable error types exist to deliver.
+    """
+    from temporalio.exceptions import ApplicationError
+
+    message = str(exc)
+    current: BaseException | None = exc
+    while current is not None:
+        text = str(current).strip()
+        if text:
+            # Stop descending past the ApplicationError the activity chose to
+            # raise. Below it sits whatever library exception prompted it --
+            # a boto ClientError saying "pre-conditions did not hold", which
+            # is true and useless next to "this key belongs to another run".
+            message = text
+            if isinstance(current, ApplicationError):
+                break
+        current = current.__cause__
+    return message
+
+
 def _parse_meta(pairs: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for pair in pairs:
@@ -117,7 +143,7 @@ async def cmd_submit(args) -> int:
     try:
         result = await asyncio.wait_for(handle.result(), timeout=args.timeout)
     except WorkflowFailureError as exc:
-        emit({"id": handle.id, "state": "failed", "error": str(exc.cause or exc)})
+        emit({"id": handle.id, "state": "failed", "error": _failure_text(exc)})
         return 1
     except asyncio.TimeoutError:
         emit({"id": handle.id, "state": "timeout", "note": f"still running after {args.timeout}s"})
@@ -181,7 +207,7 @@ async def cmd_wait(args) -> int:
     try:
         result = await asyncio.wait_for(handle.result(), timeout=args.timeout)
     except WorkflowFailureError as exc:
-        emit({"id": args.id, "state": "failed", "error": str(exc.cause or exc)})
+        emit({"id": args.id, "state": "failed", "error": _failure_text(exc)})
         return 1
     except asyncio.TimeoutError:
         emit({"id": args.id, "state": "timeout"})
@@ -265,7 +291,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--format", default="wav", choices=list(FORMATS))
     submit.add_argument("--prefix", default="", help="key prefix inside the bucket")
     submit.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
-    submit.add_argument("--id", default=None, help="workflow id; reusing one is how you get idempotency")
+    submit.add_argument(
+        "--id",
+        default=None,
+        help="workflow id; reusing an OPEN one joins that run, reusing a CLOSED one is refused",
+    )
     submit.add_argument("--wait", action="store_true", help="block until the audio exists")
     submit.add_argument("--timeout", type=float, default=3600)
     submit.set_defaults(func=cmd_submit)

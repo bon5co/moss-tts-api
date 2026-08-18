@@ -133,7 +133,7 @@ Every command prints JSON, so an agent can parse it without scraping prose:
 | `--language` | none | Plain name, e.g. `Japanese`. Omitted, the model infers it from the text. |
 | `--format` | `wav` | `wav`, `mp3`, `flac`, `pcm`. `mp3` needs ffmpeg on the *server*. |
 | `--prefix` | none | Key prefix in the bucket, e.g. `bedtime/ep014`. |
-| `--id` | random | Reusing an id is idempotency: a repeated submission joins the existing run. |
+| `--id` | random | Reusing an id while its run is still open joins that run. Reusing one whose run has closed is refused — see the note on key collisions. |
 
 ## Design notes
 
@@ -210,6 +210,26 @@ at the default it barely moved before a clip was finished.
 first and exiting 2 leaves the jobs queued, which is the durable state we
 wanted. A worker that starts anyway takes tasks and burns their retry budget on
 a server that was never going to answer. `MOSS_TTS_STARTUP_CHECK=0` opts out.
+
+**Object keys are claimed, not overwritten.** A key is
+`{prefix}/{workflow_id}-{index}.{ext}`, and a workflow id can come back:
+Temporal's default reuse policy starts a *new* run under an id whose previous
+run has closed. A plain `put_object` is last-writer-wins, so the second run
+would silently replace the first run's audio while the first run's history
+still advertised those URLs — and nothing would error. (Thanks to the
+zimage-temporal work for finding this shape before it shipped here.)
+
+So uploads are conditional: `IfNoneMatch="*"` plus a `moss-owner` metadata tag
+naming `workflow_id:run_id`. On a 412 the tag decides. Our own earlier attempt
+— an activity that uploaded and then died before returning — is an idempotent
+success, because refusing it would turn every transient failure into a
+permanent one under exactly the conditions no hand-written test covers. Anyone
+else's object is a non-retryable `KeyCollision` telling the caller to use a
+fresh `--id` or a `--prefix`.
+
+The activity also HEADs its key *before* generating. Discovering the collision
+afterwards would mean paying the full 15-80s of synthesis and then throwing the
+result away.
 
 **Why the bucket is anonymous-read.** Same reasoning as zimage: presigned URLs
 sign over the `Host` header, so a URL minted for one of this host's names fails
