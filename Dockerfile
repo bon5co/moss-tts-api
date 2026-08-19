@@ -40,6 +40,7 @@ RUN printf '%s\n' \
     && uv pip install --system \
     --overrides /tmp/overrides.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
+    --extra server \
     -r pyproject.toml
 
 COPY app ./app

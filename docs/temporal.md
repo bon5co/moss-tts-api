@@ -66,9 +66,8 @@ docker exec opentanuki-temporal temporal operator namespace create \
 Worker, on a machine that can reach the TTS server:
 
 ```bash
-cd temporal
 cp .env.example .env      # set MOSS_S3_SECRET_KEY (or export ZIMAGE_S3_SECRET_KEY)
-uv sync
+uv sync --extra worker
 make worker
 ```
 
@@ -236,13 +235,20 @@ sign over the `Host` header, so a URL minted for one of this host's names fails
 from the other two, and every URL expires. These are generated clips on a
 private network. `MOSS_S3_PRESIGN=1` switches.
 
-**Why its own uv project rather than an extra on the root `pyproject.toml`.**
-The root project is the TTS server and depends on torch, torchaudio and
-torchcodec. This is a client of that server: temporalio, boto3, httpx. Folding
-it in would mean `uv sync` pulls several gigabytes of accelerator wheels onto
-any machine that only wants to submit a job — including the one running the
-worker, which never touches a model. The cost accepted is a second lockfile in
-the repo.
+**Why an extra with a declared conflict, rather than its own uv project.**
+The server depends on torch, torchaudio and torchcodec; this is a client of it —
+temporalio, boto3, httpx — and must not drag gigabytes of accelerator wheels
+onto a machine that only submits jobs. That was originally solved with a nested
+uv project, at the price of a second lockfile, a second `.env` holding the same
+object-storage secret, and a start command unlike every other generator here.
+
+They are now two extras on one project. The two sets genuinely cannot be
+resolved together — `moss-soundeffect-v2` pins `protobuf<3.20`, temporalio
+requires `protobuf>=3.20` — so the incompatibility is declared in `[tool.uv]`
+`conflicts`. uv then resolves each extra separately and refuses only the
+combination, which nothing wants: the worker imports none of the server's code.
+One repo, one lockfile, one `.env`, and `uv sync --extra worker` installs in
+seconds.
 
 **Durations are read, not decoded.** WAV comes from the header and `pcm` from
 arithmetic (24 kHz mono s16le). MP3 and FLAC would need a decoder, and pulling
