@@ -99,7 +99,7 @@ class Settings:
     s3_bucket: str = field(default_factory=lambda: _env("MOSS_S3_BUCKET", "moss"))
     s3_region: str = field(default_factory=lambda: _env_any(("MOSS_S3_REGION", "ZIMAGE_S3_REGION"), "us-east-1"))
     s3_access_key: str = field(
-        default_factory=lambda: _env_any(("MOSS_S3_ACCESS_KEY", "ZIMAGE_S3_ACCESS_KEY"), "zimage")
+        default_factory=lambda: _env_any(("MOSS_S3_ACCESS_KEY", "ZIMAGE_S3_ACCESS_KEY"), "minio")
     )
     s3_secret_key: str = field(default_factory=lambda: _env_any(("MOSS_S3_SECRET_KEY", "ZIMAGE_S3_SECRET_KEY"), ""))
     # The bucket is anonymous-read by default, so URLs are plain and permanent.
