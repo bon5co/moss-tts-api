@@ -2,7 +2,16 @@
 name = "moss-tts-api"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = [
+# Nothing is shared. The TTS server and the Temporal worker are two separate
+# programs that happen to live in one repo: the server holds the models, the
+# worker is an HTTP client of it and imports none of its code. Keeping the
+# model stack out of the base set is what lets `--extra worker` install in
+# seconds on a machine that will never load a checkpoint.
+dependencies = []
+
+[project.optional-dependencies]
+# The TTS server itself.
+server = [
     "accelerate>=1.14.0",
     "fastapi>=0.139.2",
     "librosa>=0.11.0",
@@ -17,6 +26,29 @@ dependencies = [
     "uvicorn[standard]>=0.51.0",
 ]
 
+# The Temporal worker and its CLI. No torch, no fastapi: it reaches the server
+# over HTTP like any other client, so it can run anywhere -- including a box
+# that has no model and no GPU.
+worker = [
+    "temporalio>=1.30.0",
+    "boto3>=1.35",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+moss = "moss_temporal.cli:main"
+moss-worker = "moss_temporal.worker:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Only the worker is packaged. The server runs from the checkout (see
+# tool.pytest pythonpath below) and is deployed by copying ./app into an image,
+# which is why it never needed installing.
+packages = ["moss_temporal"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -30,6 +62,15 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.uv]
+# The server and the worker cannot share a resolution: moss-soundeffect-v2
+# (server) pins protobuf<3.20, temporalio (worker) requires protobuf>=3.20.
+# That is a real incompatibility, not a preference -- and it is why the worker
+# started life as a separate uv project. Declaring the conflict keeps one
+# project, one lockfile and one .env while letting each extra resolve on its
+# own terms; installing both at once is what uv now refuses, correctly.
+conflicts = [
+    [{ extra = "server" }, { extra = "worker" }],
+]
 # moss-soundeffect-v2 pins transformers==4.57.1; the TTS models need >=5.
 # Force 5.x — the soundeffect pipeline's Qwen3 encoder exists there too
 # (verified by generation test).

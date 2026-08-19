@@ -12,7 +12,7 @@ serialized on the device. Any OpenAI SDK works by overriding `base_url`.
 ## Quickstart
 
 ```bash
-uv sync
+uv sync --extra server
 cp .env.example .env   # optionally set API_KEY
 uv run python -m app.main
 ```
@@ -354,12 +354,19 @@ It is an addition and changes nothing here — the HTTP API above is untouched,
 and the worker is an ordinary client of `POST /v1/audio/speech`. It exists
 because generation time is long and wildly variable (measured: 14.9s to 78s for
 the same 33-character line, plus ~127s if the model has to load), which makes a
-synchronous call a poor fit for a 31-clip batch. It is its own uv project, so
-nothing there pulls the torch stack onto a machine that only submits jobs.
+synchronous call a poor fit for a 31-clip batch.
 
 ```bash
-cd temporal && uv sync
-uv run moss submit --file script.txt --voice handler --wait
+uv sync --extra worker      # no torch, no fastapi
+make worker                 # anywhere that can reach the TTS server
+uv run --extra worker moss submit --file script.txt --voice handler --wait
 ```
 
-See [temporal/README.md](temporal/README.md) for the design and the tradeoffs.
+The server and the worker are separate extras on this one project, and they
+cannot be installed together: `moss-soundeffect-v2` pins protobuf below 3.20
+while temporalio requires 3.20 or newer. That conflict is declared in
+`[tool.uv]`, so each extra resolves on its own terms and uv refuses only the
+combination — which nothing needs, since the worker reaches the server over
+HTTP and imports none of its code.
+
+See [docs/temporal.md](docs/temporal.md) for the design and the tradeoffs.
